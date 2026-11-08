@@ -755,6 +755,8 @@ static void _sx_ssl_client(sx_t s, sx_plugin_t p) {
 #endif
 #else
     SSL_set_ssl_method(sc->ssl, TLS_client_method());
+    /* ChatServer: no SSL 3.0, TLS 1.0 or TLS 1.1 */
+    SSL_set_min_proto_version(sc->ssl, TLS1_2_VERSION);
 #endif
 
     /* empty external_id */
@@ -1013,6 +1015,10 @@ int sx_ssl_server_addcert(sx_plugin_t p, const char *name, const char *pemfile, 
         _sx_debug(ZONE, "ssl context creation failed; %s", ERR_error_string(ERR_get_error(), NULL));
         return 1;
     }
+#if OPENSSL_VERSION_NUMBER >= 0x10100005L
+    /* ChatServer: no SSL 3.0, TLS 1.0 or TLS 1.1 */
+    SSL_CTX_set_min_proto_version(ctx, TLS1_2_VERSION);
+#endif
 
     // Set allowed ciphers. if non set, at least always disable NULL and export
     if (!ciphers)
@@ -1085,7 +1091,13 @@ int sx_ssl_server_addcert(sx_plugin_t p, const char *name, const char *pemfile, 
     _sx_debug(ZONE, "setting ssl context '%s' verify mode to %02x", name, mode);
     SSL_CTX_set_verify(ctx, mode, _sx_ssl_verify_callback);
 
+#if OPENSSL_VERSION_NUMBER >= 0x30000000L
+    /* ChatServer: OpenSSL 3 picks an RFC 7919 group to match the key, in
+     * place of the deprecated callback, whose smallest group is 1024 bits */
+    SSL_CTX_set_dh_auto(ctx, 1);
+#else
     SSL_CTX_set_tmp_dh_callback(ctx, _sx_ssl_tmp_dh_callback);
+#endif
 
     /* try to read DH params from pem file */
     if((dhparams = sx_ssl_get_DHparams(pemfile))) {

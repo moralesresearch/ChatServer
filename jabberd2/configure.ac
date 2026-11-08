@@ -74,10 +74,6 @@ if test "x-$want_mio_debug" = "x-yes" ; then
     AC_DEFINE(MIO_DEBUG,1,[Define to 1 if you want to enable managed IO debug output.])
 fi
 
-# Colorized build output
-AX_CHECK_COMPILE_FLAG([-fdiagnostics-color], [CFLAGS="${CFLAGS} -fdiagnostics-color"],
-    [AX_CHECK_COMPILE_FLAG([-fcolor-diagnostics], [CFLAGS="${CFLAGS} -fcolor-diagnostics"])])
-
 # Two-step header checking.  First check for headers which don't
 # require any other headers.
 AC_HEADER_DIRENT

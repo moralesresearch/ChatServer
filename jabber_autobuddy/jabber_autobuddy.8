@@ -1,0 +1,129 @@
+.Dd November 7, 2026
+.Dt JABBER_AUTOBUDDY 8
+.Os
+.Sh NAME
+.Nm jabber_autobuddy
+.Nd manage buddies for the ChatServer XMPP service
+.Sh SYNOPSIS
+.Nm
+.Op Fl V
+.Op Fl f Ar database
+.Ar command ...
+.Nm
+.Fl h | v
+.Sh DESCRIPTION
+.Nm
+adds and removes buddies (roster entries, with presence subscription in
+both directions) by editing the SQLite database of ChatServer, the jabberd2
+XMPP server.
+A
+.Ar JID
+is
+.Ar user Ns @ Ns Ar domain ;
+buddies are only made between users of the same domain.
+Changes are logged to
+.Xr syslog 3 .
+.Pp
+The commands are:
+.Bl -tag -width "-M, --move-domain from to"
+.It Fl i , -inituser Ar JID
+Add
+.Ar JID
+to the database, as signing in for the first time would.
+The other commands only act on users who are in the database.
+.It Fl d , -deleteuser Ar JID
+Delete everything the database holds for
+.Ar JID ,
+and take it off other users' buddy lists.
+The system account is not touched.
+.It Fl a , -addbuddy Ar JID
+Make
+.Ar JID
+a buddy of every other user.
+.It Fl r , -removebuddy Ar JID
+Take
+.Ar JID
+off every other user's buddy list, and them off its list.
+.It Fl m , -all
+Make every user a buddy of every other user.
+.It Fl g , -group Ar group
+Make the members of the system group
+.Ar group
+buddies of each other, listed under a roster group of that name.
+The group is also recorded for the server's autobuddy module, which adds
+members to each other's buddy lists when they sign in.
+Members are the users listed in the group and the users whose primary
+group it is.
+.It Fl G , -group-by-id Ar gid
+The same, naming the group by its numeric ID.
+.It Fl u , -ungroup Ar group
+Undo
+.Fl -group :
+remove the buddy pairings between the members of
+.Ar group
+and stop adding them at sign-in.
+.It Fl U , -ungroup-by-id Ar gid
+The same, by numeric ID.
+.It Fl M , -move-domain Ar from to
+Move every user of domain
+.Ar from
+to domain
+.Ar to .
+.El
+.Pp
+The options are:
+.Bl -tag -width "-M, --move-domain from to"
+.It Fl f , -database Ar path
+The database; the default is
+.Pa /var/db/jabberd/sqlite.db .
+.It Fl V , -verbose
+Report each change on standard error.
+.It Fl v , -version
+Print the version and exit.
+.It Fl h , -help
+Print a summary of the commands and exit.
+.El
+.Pp
+Commands may be given more than once and run in this order:
+.Fl -deleteuser ,
+.Fl -inituser ,
+.Fl -removebuddy ,
+.Fl -addbuddy ,
+then one of
+.Fl -all ,
+.Fl -group
+or
+.Fl -ungroup ,
+which cannot be combined; then
+.Fl -move-domain .
+All changes are made in one transaction.
+The spellings of Apple's version, such as
+.Fl -i
+and
+.Fl -m ,
+are accepted too.
+.Pp
+Run as root,
+.Nm
+switches to the owner of the database before it opens it.
+Users who are signed in see changes when they next sign in.
+.Sh FILES
+.Bl -tag -width /var/db/jabberd/sqlite.db -compact
+.It Pa /var/db/jabberd/sqlite.db
+The ChatServer database.
+.El
+.Sh EXIT STATUS
+.Ex -std
+.Sh EXAMPLES
+Make the members of the group
+.Dq staff
+buddies, now and when new members sign in:
+.Pp
+.Dl jabber_autobuddy --group staff
+.Sh SEE ALSO
+.Xr pamauth 8
+.Sh HISTORY
+.Nm
+first appeared in Mac OS X Server, where groups were Open Directory groups
+and group IDs were GUIDs.
+This version for FreeBSD uses system groups.

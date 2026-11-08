@@ -5,7 +5,7 @@
 
   <!-- The process ID file. Comment this out if you don't need to know
        the process ID from outside the process (eg for control scripts) -->
-  <pidfile>@localstatedir@/@package@/pid/${id}.pid</pidfile>
+  <pidfile>@localstatedir@/run/jabberd/${id}.pid</pidfile>
 
   <!-- Router connection configuration -->
   <router>
@@ -60,12 +60,12 @@
 
     <!-- If logging to file, this is the filename of the logfile -->
     <!--
-    <file>@localstatedir@/@package@/log/c2s.log</file>
+    <file>@localstatedir@/log/jabberd/c2s.log</file>
     -->
 
     <!-- Filename of the debug logfile -->
     <!--
-    <debug>@localstatedir@/@package@/log/debug-${id}.log</debug>
+    <debug>@localstatedir@/log/jabberd/debug-${id}.log</debug>
     -->
   </log>
 
@@ -144,7 +144,13 @@
          authreg-module
          Use different authreg module than default one set in <authreg> section.
           -->
-    <id register-enable='mu'>localhost.localdomain</id>
+    <!-- ChatServer: accounts are system accounts, so there is no in-band
+         registration; realm='' makes usernames plain user names; clients
+         must use TLS before they send a password -->
+    <id realm=''
+        pemfile='@sysconfdir@/server.pem'
+        require-starttls='mu'
+    >localhost.localdomain</id>
     <!-- or
     <id realm='company.int'
         pemfile='@sysconfdir@/server.pem'
@@ -348,7 +354,7 @@
   <stats>
     <!-- file containing count of packets that went through -->
     <!--
-    <packet>@localstatedir@/@package@/stats/c2s.packets</packet>
+    <packet>@localstatedir@/db/jabberd/stats/c2s.packets</packet>
     -->
   </stats>
 
@@ -383,8 +389,17 @@
     <!-- Dynamic authreg modules path -->
     <path>@pkglibdir@</path>
 
-    <!-- Backend module to use -->
-    <module>sqlite</module>
+    <!-- Backend module to use.
+         ChatServer: pipe, with the pamauth helper below, signs users in
+         with their system account through PAM (/usr/local/etc/pam.d/jabberd),
+         as Apple's ChatServer did with Open Directory. pamauth is setuid
+         root, because pam_unix can only check passwords as root, so c2s
+         itself runs unprivileged. Other choices:
+           ldapfull  bind to an LDAP directory as the user (see <ldapfull/>)
+           pam       PAM inside c2s, for PAM stacks that need no root
+                     (pam_ldap, pam_krb5)
+           sqlite    accounts kept in jabberd's own database -->
+    <module>pipe</module>
 
     <!-- Available authentication mechanisms -->
     <mechanisms>
@@ -394,9 +409,12 @@
            Note that if the auth/reg module does not support one of
            these mechanisms, then it will not be offered regardless of
            whether or not it is enabled here. -->
+      <!-- ChatServer: none without TLS; see <ssl-mechanisms/> -->
       <traditional>
+        <!--
         <plain/>
         <digest/>
+        -->
       </traditional>
 
       <!-- SASL authentication mechanisms. Comment out any that you
@@ -404,9 +422,9 @@
            module does not support one of these mechanisms, then it will
            not be offered. -->
       <sasl>
+        <!--
         <plain/>
         <digest-md5/>
-        <!--
         <anonymous/>
         <gssapi/>
         -->
@@ -435,7 +453,7 @@
     <!-- SQLite driver configuration -->
     <sqlite>
       <!-- Database name -->
-      <dbname>@localstatedir@/@package@/db/sqlite.db</dbname>
+      <dbname>@localstatedir@/db/jabberd/sqlite.db</dbname>
 
     <!-- Use this to pass any SQL statements to the database immediately
 	  after opening it. This is typically used to set pragmas for
@@ -713,7 +731,10 @@
     <!-- Pipe module configuration -->
     <pipe>
       <!-- Program to execute -->
-      <exec>@bindir@/pipe-auth.pl</exec>
+      <!-- ChatServer: checks passwords with the PAM service "jabberd".
+           To let only members of one group sign in, as Apple's chat
+           service access list did, use pam_group(8) there -->
+      <exec>@bindir@/pamauth</exec>
     </pipe>
 
   </authreg>

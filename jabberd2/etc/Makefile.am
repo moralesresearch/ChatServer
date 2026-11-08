@@ -1,12 +1,9 @@
 LIBTOOL += --quiet
 
 sysconf_DATA = c2s.xml.dist router.xml.dist s2s.xml.dist sm.xml.dist jabberd.cfg.dist router-users.xml.dist router-filter.xml.dist
-initdir = $(prefix)/etc/init
-init_DATA = jabberd-c2s.conf jabberd-router.conf jabberd-s2s.conf jabberd-sm.conf
-systemddir = $(prefix)/lib/systemd/system
-systemd_DATA = jabberd-sm.service jabberd.service jabberd-s2s.service jabberd-router.service jabberd-c2s.service
-configs = $(sysconf_DATA) $(init_DATA) $(systemd_DATA)
-EXTRA_DIST = $(sysconf_DATA:%.dist=%.dist.in) $(init_DATA:%.conf=%.conf.in) $(systemd_DATA:%.service=%.service.in)
+# ChatServer: no upstart or systemd files; FreeBSD uses rc.d (freebsd/rc.d/chatserver)
+configs = $(sysconf_DATA)
+EXTRA_DIST = $(sysconf_DATA:%.dist=%.dist.in)
 
 SUBDIRS = templates
 
@@ -20,7 +17,7 @@ edit = sed \
 	-e 's,@libdir\@,$(libdir),g' \
 	-e 's,@pkglibdir\@,$(pkglibdir),g'
 
-$(configs): $(sysconf_DATA:%.dist=@srcdir@/%.dist.in) $(init_DATA:%.conf=@srcdir@/%.conf.in) $(systemd_DATA:%.service=%.service.in)
+$(configs): $(sysconf_DATA:%.dist=@srcdir@/%.dist.in)
 	@echo "generating $@ from $@.in"; \
     edit='$(edit)'; \
     list='$(jabberd_bin)'; for p in $$list; do \

@@ -5,7 +5,7 @@
 
   <!-- The process ID file. Comment this out if you don't need to know
        the process ID from outside the process (eg for control scripts) -->
-  <pidfile>@localstatedir@/@package@/pid/${id}.pid</pidfile>
+  <pidfile>@localstatedir@/run/jabberd/${id}.pid</pidfile>
 
   <!-- Log configuration - type is "syslog", "file" or "stdout" -->
   <log type='syslog'>
@@ -18,19 +18,19 @@
 
     <!-- If logging to file, this is the filename of the logfile -->
     <!--
-    <file>@localstatedir@/@package@/log/router.log</file>
+    <file>@localstatedir@/log/jabberd/router.log</file>
     -->
 
     <!-- Filename of the debug logfile -->
     <!--
-    <debug>@localstatedir@/@package@/log/debug-${id}.log</debug>
+    <debug>@localstatedir@/log/jabberd/debug-${id}.log</debug>
     -->
   </log>
 
   <!-- Local network configuration -->
   <local>
     <!-- IP address to bind to (default: 0.0.0.0) -->
-    <ip>0.0.0.0</ip>
+    <ip>127.0.0.1</ip>
 
     <!-- Port to bind to (default: 5347) -->
     <port>5347</port>

@@ -5,7 +5,7 @@
 
   <!-- The process ID file. Comment this out if you don't need to know
        the process ID from outside the process (eg for control scripts) -->
-  <pidfile>@localstatedir@/@package@/pid/${id}.pid</pidfile>
+  <pidfile>@localstatedir@/run/jabberd/${id}.pid</pidfile>
 
   <!-- Router connection configuration -->
   <router>
@@ -60,12 +60,12 @@
 
     <!-- If logging to file, this is the filename of the logfile -->
     <!--
-    <file>@localstatedir@/@package@/log/sm.log</file>
+    <file>@localstatedir@/log/jabberd/sm.log</file>
     -->
 
     <!-- Filename of the debug logfile -->
     <!--
-    <debug>@localstatedir@/@package@/log/debug-${id}.log</debug>
+    <debug>@localstatedir@/log/jabberd/debug-${id}.log</debug>
     -->
   </log>
 
@@ -139,7 +139,7 @@
     <!-- SQLite driver configuration -->
     <sqlite>
       <!-- Database name -->
-      <dbname>@localstatedir@/@package@/db/sqlite.db</dbname>
+      <dbname>@localstatedir@/db/jabberd/sqlite.db</dbname>
      <!-- Use this to pass any SQL statements to the database immediately
           after opening it. This is typically used to set pragmas for
           performance tuning. -->
@@ -510,6 +510,8 @@
          before a session is created). -->
     <chain id='user-load'>
       <module>active</module>           <!-- get active status -->
+      <module>autobuddy</module>        <!-- Apple: buddies for members of the groups set with
+                                             jabber_autobuddy(8) - must come before roster -->
       <module>roster</module>           <!-- load the roster and trust list -->
       <module>roster-publish</module>   <!-- load the published roster -->
       <module>privacy</module>          <!-- load privacy lists -->
@@ -642,9 +644,9 @@
          a session. This is useful if you already have users in an
          external authentication database (eg LDAP) and you don't want
          them to have to register. -->
-    <!--
+    <!-- ChatServer: on, because accounts are system accounts (PAM or LDAP),
+         not registered through c2s -->
     <auto-create/>
-    -->
 
     <!-- Define maximum size in bytes of fields of vcards.
          There is a recommendation that the avatar picture SHOULD NOT

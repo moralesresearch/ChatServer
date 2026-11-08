@@ -32,7 +32,9 @@ CONFIGURE_ARGS=	--prefix=${PREFIX} \
 		--with-extra-include-path=${LOCALBASE}/include \
 		--with-extra-library-path=${LOCALBASE}/lib
 # OpenSSL is in the base system, which has no pkg-config file for it
-CONFIGURE_ENV=	SSL_CFLAGS="-I/usr/include" SSL_LIBS="-lssl -lcrypto"
+# CC: the system compiler, even when a gcc package is installed, which
+# configure would otherwise prefer
+CONFIGURE_ENV=	CC=${CC} SSL_CFLAGS="-I/usr/include" SSL_LIBS="-lssl -lcrypto"
 
 SUBDIRS=	pamauth jabber_autobuddy
 

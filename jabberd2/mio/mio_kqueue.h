@@ -12,13 +12,11 @@
 
 #define MIO_FUNCS \
  \
-  mio_priv_t dbjdebug; \
     static mio_fd_t \
     _mio_alloc_fd(mio_t m, int fd) \
     { \
         struct kevent events[2]; \
         mio_priv_fd_t priv_fd; \
-        dbjdebug = m; \
         priv_fd = malloc(sizeof(*priv_fd)); \
         memset(priv_fd, 0, sizeof(*priv_fd)); \
         priv_fd->mio_fd.fd = fd; \

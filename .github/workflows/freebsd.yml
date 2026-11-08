@@ -36,3 +36,27 @@ jobs:
             make
             make install
             sh freebsd/tests/run.sh
+
+  # SunOS images have a gcc package installed; make sure the code also
+  # builds with GCC, which is stricter about some types than clang
+  build-gcc:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build with GCC in a FreeBSD 14.5 VM
+        uses: vmactions/freebsd-vm@v1.5.9
+        with:
+          release: "14.5"
+          sync: rsync
+          copyback: false
+          prepare: |
+            env ASSUME_ALWAYS_YES=yes pkg install autoconf automake libtool \
+              pkgconf gmake expat libidn udns gsasl sqlite3 openldap26-client \
+              gcc
+          run: |
+            set -e
+            gcc --version | head -1
+            make CC=gcc

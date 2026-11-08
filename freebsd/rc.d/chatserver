@@ -1,0 +1,154 @@
+#!/bin/sh
+#
+# PROVIDE: chatserver
+# REQUIRE: LOGIN NETWORKING
+# KEYWORD: shutdown
+#
+# ChatServer: jabberd2, the XMPP server of Apple's OS X Server, for FreeBSD.
+# It is off by default. Add these lines to /etc/rc.conf to run it:
+#
+# chatserver_enable (bool):	Set to "YES" to run ChatServer. Default: "NO"
+# chatserver_user (str):	User the components run as. Default: "jabber"
+# chatserver_confdir (str):	Configuration directory.
+#				Default: "/usr/local/etc/jabberd"
+# chatserver_components (str):	Components, in start order.
+#				Default: "router sm s2s c2s"
+# chatserver_gencert (bool):	Create a self-signed certificate,
+#				${chatserver_confdir}/server.pem, if there is
+#				none. Default: "YES"
+#
+# The domain is set by <id> in sm.xml and c2s.xml (localhost.localdomain
+# until it is changed). Users sign in with their system account through
+# PAM (/usr/local/etc/pam.d/jabberd); see pamauth(8) and
+# jabber_autobuddy(8).
+
+. /etc/rc.subr
+
+name=chatserver
+rcvar=chatserver_enable
+desc="ChatServer XMPP (Jabber) server"
+
+load_rc_config $name
+
+: ${chatserver_enable:="NO"}
+: ${chatserver_user:="jabber"}
+: ${chatserver_confdir:="/usr/local/etc/jabberd"}
+: ${chatserver_components:="router sm s2s c2s"}
+: ${chatserver_gencert:="YES"}
+
+bindir=/usr/local/libexec/jabberd
+schema=/usr/local/share/jabberd/db-setup.sqlite
+rundir=/var/run/jabberd
+dbdir=/var/db/jabberd
+logdir=/var/log/jabberd
+pemfile="${chatserver_confdir}/server.pem"
+
+start_precmd=chatserver_prestart
+start_cmd=chatserver_start
+stop_cmd=chatserver_stop
+status_cmd=chatserver_status
+extra_commands="status"
+
+# daemon(8) supervises each component and restarts it if it exits
+_supervisor_pidfile()
+{
+	echo "${rundir}/$1.daemon.pid"
+}
+
+_running()
+{
+	local pidfile
+	pidfile=$(_supervisor_pidfile $1)
+	[ -f "${pidfile}" ] && pgrep -F "${pidfile}" -q daemon 2>/dev/null
+}
+
+chatserver_prestart()
+{
+	local group
+	group=$(id -gn ${chatserver_user}) || return 1
+
+	install -d -o ${chatserver_user} -g ${group} -m 750 \
+	    ${rundir} ${dbdir} ${dbdir}/stats ${logdir}
+
+	if [ ! -f ${dbdir}/sqlite.db ]; then
+		echo "Creating the ChatServer database ${dbdir}/sqlite.db."
+		su -m ${chatserver_user} -c \
+		    "umask 077; /usr/local/bin/sqlite3 ${dbdir}/sqlite.db < ${schema}" \
+		    >/dev/null || return 1
+	fi
+
+	if [ ! -f "${pemfile}" ] && checkyesno chatserver_gencert; then
+		echo "Creating a self-signed certificate ${pemfile} for $(hostname)."
+		( umask 077
+		  openssl req -x509 -newkey rsa:3072 -nodes -days 3650 \
+		      -subj "/CN=$(hostname)" -keyout "${pemfile}.key" \
+		      -out "${pemfile}.crt" >/dev/null 2>&1 &&
+		  cat "${pemfile}.crt" "${pemfile}.key" > "${pemfile}"
+		  rc=$?
+		  rm -f "${pemfile}.crt" "${pemfile}.key"
+		  exit ${rc} ) || return 1
+		chown root:${group} "${pemfile}"
+		chmod 640 "${pemfile}"
+	fi
+}
+
+chatserver_start()
+{
+	local c
+
+	echo "Starting ${name}."
+	for c in ${chatserver_components}; do
+		if _running ${c}; then
+			echo "${c} is already running."
+			continue
+		fi
+		/usr/sbin/daemon -f -r -R 5 -u ${chatserver_user} \
+		    -P $(_supervisor_pidfile ${c}) -t "chatserver: ${c}" \
+		    ${bindir}/${c} -c ${chatserver_confdir}/${c}.xml
+		# the other components connect to the router
+		if [ ${c} = router ]; then
+			sleep 1
+		fi
+	done
+	return 0
+}
+
+chatserver_stop()
+{
+	local c pids pidfile
+
+	echo "Stopping ${name}."
+	pids=
+	for c in $(echo ${chatserver_components} | tr ' ' '\n' | tail -r); do
+		pidfile=$(_supervisor_pidfile ${c})
+		if _running ${c}; then
+			pids="${pids} $(cat ${pidfile})"
+			kill -TERM $(cat ${pidfile})
+		fi
+	done
+	if [ -n "${pids}" ]; then
+		wait_for_pids ${pids}
+	fi
+	for c in ${chatserver_components}; do
+		rm -f $(_supervisor_pidfile ${c})
+	done
+	return 0
+}
+
+chatserver_status()
+{
+	local c rc
+
+	rc=0
+	for c in ${chatserver_components}; do
+		if _running ${c}; then
+			echo "${c} is running as pid $(pgrep -P $(cat $(_supervisor_pidfile ${c})))."
+		else
+			echo "${c} is not running."
+			rc=1
+		fi
+	done
+	return ${rc}
+}
+
+run_rc_command "$1"

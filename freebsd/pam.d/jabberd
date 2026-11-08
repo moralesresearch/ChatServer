@@ -1,0 +1,15 @@
+#
+# PAM policy for ChatServer (jabberd2): pamauth(8) checks XMPP sign-ins
+# against it, as Apple's ChatServer checked them against Open Directory.
+#
+
+# auth
+auth		required	pam_unix.so		no_warn try_first_pass
+
+# account
+account		required	pam_nologin.so
+account		required	pam_unix.so
+
+# To let only the members of one group sign in, as Apple's chat service
+# access list (SACL) did, uncomment this line and set the group:
+#account	required	pam_group.so		luser group=chat

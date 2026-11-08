@@ -1,0 +1,38 @@
+# Build ChatServer and test it end to end in a FreeBSD 14.5 VM.
+# GitLab.com's hosted runners have no KVM, so this runs on the GitHub
+# mirror (moralesresearch/ChatServer)
+name: FreeBSD
+
+on:
+  push:
+    branches: ['freebsd-port', 'freebsd/**']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Build, install and test in a FreeBSD 14.5 VM
+        uses: vmactions/freebsd-vm@v1.5.9
+        with:
+          release: "14.5"
+          sync: rsync
+          copyback: false
+          prepare: |
+            env ASSUME_ALWAYS_YES=yes pkg install autoconf automake libtool \
+              pkgconf gmake expat libidn udns gsasl sqlite3 openldap26-client \
+              python3
+          run: |
+            set -e
+            freebsd-version -ku
+            make
+            make install
+            sh freebsd/tests/run.sh

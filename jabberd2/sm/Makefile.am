@@ -4,6 +4,7 @@ AM_CPPFLAGS = -I@top_srcdir@
 bin_PROGRAMS = sm
 
 pkglib_LTLIBRARIES = mod_active.la \
+                  mod_autobuddy.la \
                   mod_announce.la \
                   mod_amp.la \
                   mod_deliver.la \
@@ -194,6 +195,12 @@ mod_validate_la_SOURCES = mod_validate.c
 mod_validate_la_LDFLAGS = -module -export-dynamic
 if USE_LIBSUBST
 mod_validate_la_LIBADD = $(top_builddir)/subst/libsubst.la
+endif
+
+mod_autobuddy_la_SOURCES = mod_autobuddy.c
+mod_autobuddy_la_LDFLAGS = -module -export-dynamic
+if USE_LIBSUBST
+mod_autobuddy_la_LIBADD = $(top_builddir)/subst/libsubst.la
 endif
 
 mod_verify_la_SOURCES = mod_verify.c

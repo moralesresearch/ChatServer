@@ -610,6 +610,91 @@ static st_ret_t _st_sqlite_replace (st_driver_t drv, const char *type,
     return st_SUCCESS;
 }
 
+/* Apple (ChatServer): run a read-only query from a module, for queries that
+ * the storage API cannot express, such as listing all active users. Every
+ * column is returned, including collection-owner. Used by mod_autobuddy */
+static st_ret_t _st_sqlite_get_custom_sql (st_driver_t drv, const char *request, os_t *os) {
+
+    drvdata_t data = (drvdata_t) drv->private;
+    sqlite3_stmt *stmt;
+    os_object_t o;
+    unsigned int num_rows = 0;
+    int i, result, ival;
+
+    if (request == NULL) {
+	return st_NOTFOUND;
+    }
+
+    log_debug (ZONE, "custom sql: %s", request);
+
+    result = sqlite3_prepare_v2 (data->db, request, -1, &stmt, NULL);
+    if (result != SQLITE_OK) {
+	log_write (drv->st->log, LOG_ERR,
+		   "sqlite: custom sql failed: %s", sqlite3_errmsg (data->db));
+	return st_FAILED;
+    }
+
+    if (!sqlite3_stmt_readonly (stmt)) {
+	log_write (drv->st->log, LOG_ERR,
+		   "sqlite: refusing custom sql that writes: %s", request);
+	sqlite3_finalize (stmt);
+	return st_FAILED;
+    }
+
+    *os = os_new ();
+
+    while ((result = sqlite3_step (stmt)) == SQLITE_ROW) {
+
+	int num_cols = sqlite3_data_count (stmt);
+
+	o = os_object_new (*os);
+
+	for (i = 0; i < num_cols; i++) {
+
+	    const char *colname = sqlite3_column_name (stmt, i);
+	    const char *decltype = sqlite3_column_decltype (stmt, i);
+	    int coltype = sqlite3_column_type (stmt, i);
+
+	    if (colname == NULL || coltype == SQLITE_NULL) {
+		continue;
+	    }
+
+	    if (coltype == SQLITE_INTEGER) {
+		ival = sqlite3_column_int (stmt, i);
+		os_object_put (o, colname, &ival,
+			       (decltype != NULL && strcmp (decltype, "BOOL") == 0) ?
+			       os_type_BOOLEAN : os_type_INTEGER);
+	    } else if (coltype == SQLITE3_TEXT) {
+		os_object_put (o, colname, sqlite3_column_text (stmt, i), os_type_STRING);
+	    } else {
+		log_write (drv->st->log, LOG_NOTICE,
+			   "sqlite: unknown field: %s:%d", colname, coltype);
+	    }
+	}
+
+	num_rows++;
+    }
+
+    if (result != SQLITE_DONE) {
+	log_write (drv->st->log, LOG_ERR,
+		   "sqlite: custom sql failed: %s", sqlite3_errmsg (data->db));
+	sqlite3_finalize (stmt);
+	os_free (*os);
+	*os = NULL;
+	return st_FAILED;
+    }
+
+    sqlite3_finalize (stmt);
+
+    if (num_rows == 0) {
+	os_free (*os);
+	*os = NULL;
+	return st_NOTFOUND;
+    }
+
+    return st_SUCCESS;
+}
+
 static void _st_sqlite_free (st_driver_t drv) {
 
     drvdata_t data = (drvdata_t) drv->private;
@@ -677,6 +762,7 @@ DLLEXPORT st_ret_t st_init(st_driver_t drv) {
     drv->get = _st_sqlite_get;
     drv->delete = _st_sqlite_delete;
     drv->replace = _st_sqlite_replace;
+    drv->get_custom_sql = _st_sqlite_get_custom_sql;
     drv->free = _st_sqlite_free;
 
     return st_SUCCESS;

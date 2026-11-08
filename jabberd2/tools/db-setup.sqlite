@@ -57,6 +57,8 @@ CREATE TABLE "roster-items" (
     "ask" INTEGER NOT NULL );
 
 CREATE INDEX i_rosteri_owner ON "roster-items"("collection-owner");
+-- Apple (ChatServer): speeds up jabber_autobuddy and mod_autobuddy
+CREATE INDEX i_rosteri_owner_jid ON "roster-items"("collection-owner", "jid");
 
 --
 -- Roster groups
@@ -257,5 +259,16 @@ CREATE TABLE "verify" (
     "email" text NOT NULL,
     "code" text,
     "state" INTEGER DEFAULT 0);
+
+--
+-- Apple (ChatServer): groups whose members are made buddies of each
+-- other when they sign in
+-- Used by: mod_autobuddy, jabber_autobuddy
+--
+CREATE TABLE "autobuddy-groups" (
+    "group" TEXT NOT NULL,
+    "object-sequence" INTEGER PRIMARY KEY );
+
+CREATE UNIQUE INDEX i_autobuddy_groups_group ON "autobuddy-groups"("group");
 
 COMMIT;

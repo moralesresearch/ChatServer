@@ -1,0 +1,74 @@
+.Dd November 7, 2026
+.Dt PAMAUTH 8
+.Os
+.Sh NAME
+.Nm pamauth
+.Nd PAM password checks for the ChatServer XMPP service
+.Sh SYNOPSIS
+.Nm
+.Sh DESCRIPTION
+.Nm
+lets users sign in to ChatServer, the jabberd2 XMPP server, with their
+system account.
+The c2s component starts it when
+.Pa c2s.xml
+selects the
+.Dq pipe
+authreg module with
+.Nm
+as its program, and sends it one request per line on standard input:
+.Bl -tag -width "CHECK-PASSWORD user password realm"
+.It Li USER-EXISTS Ar user realm
+Answers
+.Li OK
+if
+.Xr getpwnam 3
+finds
+.Ar user ,
+otherwise
+.Li NO .
+.It Li CHECK-PASSWORD Ar user password realm
+Checks the base64-encoded
+.Ar password
+with the
+.Xr pam 3
+service
+.Dq jabberd ,
+running both its auth and account parts.
+Answers
+.Li OK
+or
+.Li NO .
+.It Li FREE
+Exits.
+.El
+.Pp
+The realm is ignored.
+Results are logged to
+.Xr syslog 3
+with the auth facility.
+.Pp
+.Xr pam_unix 8
+can only check passwords as root, so
+.Nm
+is installed setuid root and can be run only by the
+.Dq jabber
+group, which lets c2s itself run without privileges.
+.Sh FILES
+.Bl -tag -width /usr/local/etc/pam.d/jabberd -compact
+.It Pa /usr/local/etc/pam.d/jabberd
+The PAM policy.
+To let only the members of one group sign in, add
+.Xr pam_group 8
+to its account part.
+.El
+.Sh SEE ALSO
+.Xr jabber_autobuddy 8 ,
+.Xr pam.conf 5 ,
+.Xr pam_group 8 ,
+.Xr pam_unix 8
+.Sh HISTORY
+Apple's ChatServer, the jabberd2 build in OS X Server, checked passwords
+against Open Directory.
+.Nm
+replaces that for the FreeBSD port.

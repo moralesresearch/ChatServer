@@ -477,6 +477,25 @@ static int _c2s_client_sx_callback(sx_t s, sx_event_t e, void *data, void *arg) 
     return 0;
 }
 
+/*
+ * ChatServer: a session id that is never reused. jabberd2 used the socket's
+ * fd number, which the kernel hands to the next connection as soon as a
+ * client disconnects, so the sm's late packets for the old session (route
+ * errors in particular, which close the stream) reached the new one.
+ */
+static int _c2s_next_session_tag(c2s_t c2s) {
+    static int last = 0;
+    char key[44];
+
+    do {
+        if(++last <= 0)
+            last = 1;
+        snprintf(key, sizeof(key), "%d", last);
+    } while(xhash_get(c2s->sessions, key) != NULL);
+
+    return last;
+}
+
 static int _c2s_client_accept_check(c2s_t c2s, mio_fd_t fd, const char *ip) {
     rate_t rt;
 
@@ -585,7 +604,7 @@ static int _c2s_client_mio_callback(mio_t m, mio_action_t a, mio_fd_t fd, void *
             /* they did something */
             sess->last_activity = time(NULL);
 
-            sess->s = sx_new(c2s->sx_env, fd->fd, _c2s_client_sx_callback, (void *) sess);
+            sess->s = sx_new(c2s->sx_env, _c2s_next_session_tag(c2s), _c2s_client_sx_callback, (void *) sess);
             mio_app(m, fd, _c2s_client_mio_callback, (void *) sess);
 
             if(c2s->stanza_size_limit != 0)
@@ -607,7 +626,7 @@ static int _c2s_client_mio_callback(mio_t m, mio_action_t a, mio_fd_t fd, void *
             port = j_inet_getport(&sa);
 
             /* remember it */
-            sprintf(sess->skey, "%d", fd->fd);
+            sprintf(sess->skey, "%d", sess->s->tag);
             xhash_put(c2s->sessions, sess->skey, (void *) sess);
 
             flags = SX_SASL_OFFER;

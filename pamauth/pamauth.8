@@ -1,4 +1,4 @@
-.Dd November 7, 2026
+.Dd November 14, 2026
 .Dt PAMAUTH 8
 .Os
 .Sh NAME
@@ -24,8 +24,8 @@ Answers
 if
 .Xr getpwnam 3
 finds
-.Ar user ,
-otherwise
+.Ar user
+and the account may use chat (see below), otherwise
 .Li NO .
 .It Li CHECK-PASSWORD Ar user password realm
 Checks the base64-encoded
@@ -44,6 +44,19 @@ Exits.
 .El
 .Pp
 The realm is ignored.
+A request that is malformed or too long is answered with
+.Li NO .
+.Pp
+Only accounts with a user ID of 1000 or more may use chat.
+For root and the system accounts below 1000, both requests are answered
+.Li NO
+without asking PAM, so the chat service cannot be used to guess their
+passwords.
+The limit is fixed when
+.Nm
+is built
+.Pq Dv MIN_UID .
+.Pp
 Results are logged to
 .Xr syslog 3
 with the auth facility.
@@ -54,13 +67,18 @@ can only check passwords as root, so
 is installed setuid root and can be run only by the
 .Dq jabber
 group, which lets c2s itself run without privileges.
+It does not delay its answer after a wrong password, because c2s waits
+for it; c2s closes a stream after three failed attempts and limits the
+connections per address instead.
 .Sh FILES
 .Bl -tag -width /usr/local/etc/pam.d/jabberd -compact
 .It Pa /usr/local/etc/pam.d/jabberd
 The PAM policy.
-To let only the members of one group sign in, add
+As installed, its account part uses
 .Xr pam_group 8
-to its account part.
+to let only the members of the
+.Dq chat
+group sign in.
 .El
 .Sh SEE ALSO
 .Xr jabber_autobuddy 8 ,

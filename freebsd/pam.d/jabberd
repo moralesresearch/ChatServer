@@ -1,4 +1,6 @@
 #
+# License: GPL-2.0-or-later, like jabberd2 (see COPYING).
+#
 # PAM policy for ChatServer (jabberd2): pamauth(8) checks XMPP sign-ins
 # against it, as Apple's ChatServer checked them against Open Directory.
 #
@@ -10,6 +12,9 @@ auth		required	pam_unix.so		no_warn try_first_pass
 account		required	pam_nologin.so
 account		required	pam_unix.so
 
-# To let only the members of one group sign in, as Apple's chat service
-# access list (SACL) did, uncomment this line and set the group:
-#account	required	pam_group.so		luser group=chat
+# Only the members of the chat group may sign in, as with Apple's chat
+# service access list (SACL). "make install" creates the group, empty; add
+# users with "pw groupmod chat -m user". An empty or missing group lets
+# nobody in. Whatever this file says, pamauth(8) refuses root and the
+# system accounts (uids below 1000).
+account		required	pam_group.so		luser group=chat

@@ -65,6 +65,43 @@ logmsg(int pri, const char *fmt, ...)
 	}
 }
 
+/*
+ * What was done is only reported (and written to syslog) once it has been
+ * committed.
+ */
+static char **notices;
+static int nnotices;
+
+static void
+notice(const char *fmt, ...)
+{
+	va_list ap;
+	char *msg;
+
+	va_start(ap, fmt);
+	if (vasprintf(&msg, fmt, ap) == -1)
+		err(1, "malloc");
+	va_end(ap);
+	notices = reallocarray(notices, nnotices + 1, sizeof(char *));
+	if (notices == NULL)
+		err(1, "malloc");
+	notices[nnotices++] = msg;
+}
+
+static void
+report_notices(void)
+{
+	int i;
+
+	for (i = 0; i < nnotices; i++) {
+		logmsg(LOG_NOTICE, "%s", notices[i]);
+		free(notices[i]);
+	}
+	free(notices);
+	notices = NULL;
+	nnotices = 0;
+}
+
 static void
 dbfail(const char *what)
 {
@@ -74,14 +111,50 @@ dbfail(const char *what)
 	exit(1);
 }
 
+/*
+ * Statements are prepared once and kept: the same few run for every pair
+ * of buddies.
+ */
+static struct stmt {
+	char		*sql;
+	sqlite3_stmt	*st;
+} *stmts;
+static int nstmts;
+
 static sqlite3_stmt *
 prepare(const char *sql)
 {
 	sqlite3_stmt *st;
+	int i;
+
+	for (i = 0; i < nstmts; i++)
+		if (strcmp(stmts[i].sql, sql) == 0) {
+			sqlite3_reset(stmts[i].st);
+			sqlite3_clear_bindings(stmts[i].st);
+			return (stmts[i].st);
+		}
 
 	if (sqlite3_prepare_v2(db, sql, -1, &st, NULL) != SQLITE_OK)
 		dbfail(sql);
+	stmts = reallocarray(stmts, nstmts + 1, sizeof(*stmts));
+	if (stmts == NULL || (stmts[nstmts].sql = strdup(sql)) == NULL)
+		err(1, "malloc");
+	stmts[nstmts++].st = st;
 	return (st);
+}
+
+static void
+finalize_all(void)
+{
+	int i;
+
+	for (i = 0; i < nstmts; i++) {
+		sqlite3_finalize(stmts[i].st);
+		free(stmts[i].sql);
+	}
+	free(stmts);
+	stmts = NULL;
+	nstmts = 0;
 }
 
 /* run a statement with text parameters; returns the number of rows changed */
@@ -101,7 +174,7 @@ run(const char *sql, int n, ...)
 		;
 	if (rc != SQLITE_DONE)
 		dbfail(sql);
-	sqlite3_finalize(st);
+	sqlite3_reset(st);
 	return (sqlite3_changes(db));
 }
 
@@ -122,7 +195,7 @@ count(const char *sql, int n, ...)
 		c = sqlite3_column_int(st, 0);
 	else
 		dbfail(sql);
-	sqlite3_finalize(st);
+	sqlite3_reset(st);
 	return (c);
 }
 
@@ -167,7 +240,11 @@ static void
 load_active(void)
 {
 	sqlite3_stmt *st;
-	int rc;
+	int rc, i;
+
+	for (i = 0; i < nactive; i++)
+		free(active[i]);
+	nactive = 0;
 
 	st = prepare("SELECT \"collection-owner\" FROM \"active\" "
 	    "ORDER BY \"collection-owner\"");
@@ -183,7 +260,7 @@ load_active(void)
 	}
 	if (rc != SQLITE_DONE)
 		dbfail("reading active users");
-	sqlite3_finalize(st);
+	sqlite3_reset(st);
 }
 
 static int
@@ -242,38 +319,72 @@ group_lookup(const char *name, int by_gid)
 	return (g);
 }
 
+/*
+ * What the name service says about a user: asked once, and for all the
+ * users known beforehand, before the database is locked (see main), since
+ * a directory lookup can take a while.
+ */
+struct user_info {
+	char	*user;
+	char	*name;		/* full name from the GECOS field, or NULL */
+	int	 has_gid;
+	gid_t	 gid;		/* primary group */
+};
+
+static struct user_info *users;
+static int nusers;
+
+static const struct user_info *
+user_info(const char *user)
+{
+	struct user_info *u;
+	struct passwd *pw;
+	size_t n;
+	int i;
+
+	for (i = 0; i < nusers; i++)
+		if (strcmp(users[i].user, user) == 0)
+			return (&users[i]);
+
+	users = reallocarray(users, nusers + 1, sizeof(*users));
+	if (users == NULL)
+		err(1, "malloc");
+	u = &users[nusers];
+	memset(u, 0, sizeof(*u));
+	if ((u->user = strdup(user)) == NULL)
+		err(1, "malloc");
+	if ((pw = getpwnam(user)) != NULL) {
+		u->has_gid = 1;
+		u->gid = pw->pw_gid;
+		n = pw->pw_gecos != NULL ? strcspn(pw->pw_gecos, ",") : 0;
+		if (n > 255)
+			n = 255;
+		if (n > 0 && (u->name = strndup(pw->pw_gecos, n)) == NULL)
+			err(1, "malloc");
+	}
+	nusers++;
+	return (u);
+}
+
 /* listed members, and users whose primary group it is */
 static int
 group_has(const struct group_info *g, const char *user)
 {
-	struct passwd *pw;
+	const struct user_info *u;
 	char **m;
 
 	for (m = g->members; *m != NULL; m++)
 		if (strcmp(*m, user) == 0)
 			return (1);
-	pw = getpwnam(user);
-	return (pw != NULL && pw->pw_gid == g->gid);
+	u = user_info(user);
+	return (u->has_gid && u->gid == g->gid);
 }
 
 /* the full name from the GECOS field, or NULL */
-static char *
+static const char *
 full_name(const char *user)
 {
-	static char buf[256];
-	struct passwd *pw;
-	size_t n;
-
-	if ((pw = getpwnam(user)) == NULL || pw->pw_gecos == NULL)
-		return (NULL);
-	n = strcspn(pw->pw_gecos, ",");
-	if (n == 0)
-		return (NULL);
-	if (n >= sizeof(buf))
-		n = sizeof(buf) - 1;
-	memcpy(buf, pw->pw_gecos, n);
-	buf[n] = '\0';
-	return (buf);
+	return (user_info(user)->name);
 }
 
 /* put buddy in owner's roster with subscription both, in group if given */
@@ -354,7 +465,7 @@ owner_tables(int *n)
 			err(1, "malloc");
 		(*n)++;
 	}
-	sqlite3_finalize(st);
+	sqlite3_reset(st);
 	return (t);
 }
 
@@ -385,7 +496,7 @@ cmd_inituser(const char *jid)
 	}
 	run("INSERT INTO \"active\" (\"collection-owner\", \"time\") "
 	    "VALUES (?, strftime('%s', 'now'))", 1, jid);
-	logmsg(LOG_NOTICE, "initialized %s", jid);
+	notice("initialized %s", jid);
 }
 
 static void
@@ -408,7 +519,7 @@ cmd_deleteuser(const char *jid)
 	free(tables);
 	run("DELETE FROM \"roster-items\" WHERE \"jid\" = ?", 1, jid);
 	run("DELETE FROM \"roster-groups\" WHERE \"jid\" = ?", 1, jid);
-	logmsg(LOG_NOTICE, "deleted %s", jid);
+	notice("deleted %s", jid);
 }
 
 static void
@@ -420,7 +531,7 @@ cmd_addbuddy(const char *jid)
 	for (i = 0; i < nactive; i++)
 		if (same_domain(jid, active[i]))
 			pair(jid, active[i], NULL);
-	logmsg(LOG_NOTICE, "made %s a buddy of all users", jid);
+	notice("made %s a buddy of all users", jid);
 }
 
 static void
@@ -432,8 +543,7 @@ cmd_removebuddy(const char *jid)
 	for (i = 0; i < nactive; i++)
 		if (same_domain(jid, active[i]))
 			unpair(jid, active[i]);
-	logmsg(LOG_NOTICE, "removed %s from the buddy lists of all users",
-	    jid);
+	notice("removed %s from the buddy lists of all users", jid);
 }
 
 static void
@@ -445,13 +555,12 @@ cmd_all(void)
 		for (j = i + 1; j < nactive; j++)
 			if (same_domain(active[i], active[j]))
 				pair(active[i], active[j], NULL);
-	logmsg(LOG_NOTICE, "made all users buddies");
+	notice("made all users buddies");
 }
 
 static void
-cmd_group(const char *arg, int by_gid)
+cmd_group(const struct group_info *g)
 {
-	struct group_info *g = group_lookup(arg, by_gid);
 	int i, j;
 
 	/* mod_autobuddy adds members who sign in later */
@@ -465,13 +574,12 @@ cmd_group(const char *arg, int by_gid)
 			    group_has(g, jid_node(active[j])))
 				pair(active[i], active[j], g->name);
 	}
-	logmsg(LOG_NOTICE, "made the members of group %s buddies", g->name);
+	notice("made the members of group %s buddies", g->name);
 }
 
 static void
-cmd_ungroup(const char *arg, int by_gid)
+cmd_ungroup(const struct group_info *g)
 {
-	struct group_info *g = group_lookup(arg, by_gid);
 	int i, j;
 
 	run("DELETE FROM \"autobuddy-groups\" WHERE \"group\" = ?", 1,
@@ -484,10 +592,11 @@ cmd_ungroup(const char *arg, int by_gid)
 			    group_has(g, jid_node(active[j])))
 				unpair(active[i], active[j]);
 	}
-	logmsg(LOG_NOTICE, "removed the buddy pairings of group %s", g->name);
+	notice("removed the buddy pairings of group %s", g->name);
 }
 
-static void
+/* returns the number of rows changed */
+static int
 cmd_move_domain(const char *from, const char *to)
 {
 	static const char *columns[] = { "collection-owner", "jid" };
@@ -517,20 +626,27 @@ cmd_move_domain(const char *from, const char *to)
 		free(tables[i]);
 	}
 	free(tables);
-	logmsg(LOG_NOTICE, "moved %s to %s (%d rows)", from, to, moved);
+	if (moved > 0)
+		notice("moved %s to %s (%d rows)", from, to, moved);
+	return (moved);
 }
 
+/* a domain name, made lower case as jabberd stores them */
 static void
-check_domain(const char *d)
+check_domain(char *d)
 {
-	const char *p;
+	char *p;
 
 	if (*d == '\0')
 		errx(1, "empty domain");
-	for (p = d; *p != '\0'; p++)
+	if (*d == '-' || *d == '.')
+		errx(1, "%s: not a domain name", d);
+	for (p = d; *p != '\0'; p++) {
 		if (!isalnum((unsigned char)*p) && *p != '.' && *p != '-' &&
 		    *p != '_')
 			errx(1, "%s: not a domain name", d);
+		*p = tolower((unsigned char)*p);
+	}
 }
 
 /*
@@ -629,8 +745,9 @@ main(int argc, char *argv[])
 	};
 	char *init[MAXJIDS], *del[MAXJIDS], *add[MAXJIDS], *rem[MAXJIDS];
 	int ninit = 0, ndel = 0, nadd = 0, nrem = 0;
-	const char *dbpath = DEFAULT_DB, *group = NULL, *mfrom = NULL;
-	const char *mto = NULL;
+	const char *dbpath = DEFAULT_DB, *group = NULL;
+	char *mfrom = NULL, *mto = NULL;
+	struct group_info *g = NULL;
 	int ch, all = 0, ungroup = 0, by_gid = 0, bulk = 0, help = 0, ver = 0;
 	int i;
 
@@ -708,8 +825,29 @@ main(int argc, char *argv[])
 	bulk = all + (group != NULL);
 	if (bulk > 1)
 		errx(1, "--all, --group and --ungroup cannot be combined");
+	/* options but no command */
+	if (ndel + ninit + nrem + nadd + bulk == 0 && mfrom == NULL)
+		usage(1);
 
 	open_db(dbpath);
+
+	/*
+	 * Ask the name service everything before the database is locked:
+	 * the group, and the primary group and full name of every user who
+	 * can become a buddy. The sm waits for the lock, and a directory
+	 * can be slow. (A user who appears in the database between here and
+	 * BEGIN is looked up then.)
+	 */
+	if (group != NULL)
+		g = group_lookup(group, by_gid);
+	if (nrem + nadd + bulk > 0) {
+		load_active();
+		for (i = 0; i < nactive; i++)
+			(void)user_info(jid_node(active[i]));
+		for (i = 0; i < ninit; i++)
+			(void)user_info(jid_node(init[i]));
+	}
+
 	if (sqlite3_exec(db, "BEGIN IMMEDIATE", NULL, NULL, NULL) != SQLITE_OK)
 		dbfail("BEGIN");
 
@@ -724,15 +862,24 @@ main(int argc, char *argv[])
 		cmd_addbuddy(add[i]);
 	if (all)
 		cmd_all();
-	else if (group != NULL && ungroup)
-		cmd_ungroup(group, by_gid);
-	else if (group != NULL)
-		cmd_group(group, by_gid);
-	if (mfrom != NULL)
-		cmd_move_domain(mfrom, mto);
+	else if (g != NULL && ungroup)
+		cmd_ungroup(g);
+	else if (g != NULL)
+		cmd_group(g);
+	if (mfrom != NULL && cmd_move_domain(mfrom, mto) == 0) {
+		/* most likely a mistyped domain: change nothing at all */
+		logmsg(LOG_ERR, "no users in domain %s; nothing was changed",
+		    mfrom);
+		finalize_all();
+		sqlite3_exec(db, "ROLLBACK", NULL, NULL, NULL);
+		sqlite3_close(db);
+		return (1);
+	}
 
+	finalize_all();
 	if (sqlite3_exec(db, "COMMIT", NULL, NULL, NULL) != SQLITE_OK)
 		dbfail("COMMIT");
 	sqlite3_close(db);
+	report_notices();
 	return (0);
 }

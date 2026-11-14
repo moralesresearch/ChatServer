@@ -1,4 +1,4 @@
-.Dd November 7, 2026
+.Dd November 14, 2026
 .Dt JABBER_AUTOBUDDY 8
 .Os
 .Sh NAME
@@ -62,6 +62,9 @@ Undo
 remove the buddy pairings between the members of
 .Ar group
 and stop adding them at sign-in.
+This removes every roster entry between two members, including entries
+they added themselves and entries made by another
+.Fl -group .
 .It Fl U , -ungroup-by-id Ar gid
 The same, by numeric ID.
 .It Fl M , -move-domain Ar from to
@@ -69,6 +72,12 @@ Move every user of domain
 .Ar from
 to domain
 .Ar to .
+Domain names are made lower case and may not begin with a hyphen.
+If no user is in domain
+.Ar from ,
+nothing at all is changed and
+.Nm
+exits with an error.
 .El
 .Pp
 The options are:
@@ -106,7 +115,30 @@ are accepted too.
 Run as root,
 .Nm
 switches to the owner of the database before it opens it.
-Users who are signed in see changes when they next sign in.
+What was done is reported, and logged, once it has been committed.
+Given options but no command,
+.Nm
+prints its usage and exits with an error.
+.Pp
+The session manager keeps the roster of each signed-in user in memory.
+Users who are signed in see changes when they next sign in, and until
+then a change of their own (accepting a buddy, renaming one) is written
+from the copy in memory and can undo what
+.Nm
+did to the same roster entry.
+Stop the service before
+.Fl -move-domain
+and
+.Fl -deleteuser ,
+which change data the session manager holds for signed-in users.
+.Pp
+The session manager caches group membership for one minute, so a user
+added to a group is treated as a member at sign-in up to a minute later.
+A group added or removed with
+.Fl -group
+or
+.Fl -ungroup
+is noticed at once.
 .Sh FILES
 .Bl -tag -width /var/db/jabberd/sqlite.db -compact
 .It Pa /var/db/jabberd/sqlite.db

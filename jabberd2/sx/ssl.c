@@ -1091,16 +1091,23 @@ int sx_ssl_server_addcert(sx_plugin_t p, const char *name, const char *pemfile, 
     _sx_debug(ZONE, "setting ssl context '%s' verify mode to %02x", name, mode);
     SSL_CTX_set_verify(ctx, mode, _sx_ssl_verify_callback);
 
+    /* try to read DH params from pem file */
+    dhparams = sx_ssl_get_DHparams(pemfile);
+
 #if OPENSSL_VERSION_NUMBER >= 0x30000000L
-    /* ChatServer: OpenSSL 3 picks an RFC 7919 group to match the key, in
-     * place of the deprecated callback, whose smallest group is 1024 bits */
-    SSL_CTX_set_dh_auto(ctx, 1);
+    /* ChatServer: without parameters in the pem file, OpenSSL 3 picks a
+     * built-in group to match the strength of the key (the RFC 3526 MODP
+     * groups, 2048 bits and up at the default security level), in place of
+     * the deprecated callback, whose smallest group is 1024 bits. Automatic
+     * groups take precedence over SSL_CTX_set_tmp_dh(), so they are only
+     * turned on when the pem file has no parameters of its own. */
+    if(dhparams == NULL)
+        SSL_CTX_set_dh_auto(ctx, 1);
 #else
     SSL_CTX_set_tmp_dh_callback(ctx, _sx_ssl_tmp_dh_callback);
 #endif
 
-    /* try to read DH params from pem file */
-    if((dhparams = sx_ssl_get_DHparams(pemfile))) {
+    if(dhparams) {
         SSL_CTX_set_tmp_dh(ctx, dhparams);
 #if OPENSSL_VERSION_NUMBER < 0x10100005L
         _sx_debug(ZONE, "custom DH parameters loaded from certificate", BN_num_bits(dhparams->p));

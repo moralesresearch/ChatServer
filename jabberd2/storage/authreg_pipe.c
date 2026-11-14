@@ -30,231 +30,439 @@
  */
 
 /*
- * !!! this is highly experimental - be prepared for random acts of weirdness
- *     if you decide to use this.
+ * ChatServer: the request and reply handling was rewritten for the FreeBSD
+ * port, where this module carries every sign-in to the setuid pamauth
+ * helper. The rules, all of them failing closed (the user is not signed in):
+ *
+ * - a request is one line and a reply is one line. User names and realms
+ *   are checked before anything is written, so that no request can hold a
+ *   space or a newline of the client's choosing; a request that does not
+ *   fit the line buffer is not sent at all.
+ * - a reply is read up to its newline, with a time limit and a size limit.
+ * - after any error (write error, timeout, EOF, overlong or unexpected
+ *   reply) the helper is killed and its pipes are closed, so no stale reply
+ *   can ever answer a later request. The next request starts a new helper.
+ * - only the exact line "OK" is a yes.
  */
 
 #include "c2s.h"
 #include <sys/wait.h>
+#include <fcntl.h>
+#include <poll.h>
+#include <signal.h>
+#include <string.h>
+#include <unistd.h>
+
+/** longest request or reply line, including the newline */
+#define PIPE_LINE_MAX       1024
+/** how long the helper may take to answer, in milliseconds */
+#define PIPE_TIMEOUT_MS     10000
+/** longest user name: MAXLOGNAME - 1 on FreeBSD, and pamauth's limit */
+#define PIPE_USER_MAX       32
 
 /** internal structure, holds our data */
 typedef struct moddata_st {
     const char    *exec;
-    
+
+    /** the helper's pid, or 0 when no helper is running */
     pid_t   child;
 
     int     in, out;
 } *moddata_t;
 
-static int _ar_pipe_write(authreg_t ar, int fd, const char *msgfmt, ...)
+/** a user name the helper can take: letters, digits, . _ -, not starting with - */
+static int _ar_pipe_valid_user(const char *username)
 {
-    va_list args;
-    char buf[1024];
-    int ret;
+    size_t i, len;
 
-    va_start(args, msgfmt);
-    vsnprintf(buf, 1024, msgfmt, args);
-    va_end(args);
-
-    log_debug(ZONE, "writing to pipe: %s", buf);
-
-    ret = write(fd, buf, strlen(buf));
-    if(ret < 0)
-        log_write(ar->c2s->log, LOG_ERR, "pipe: write to pipe failed: %s", strerror(errno));
-
-    return ret;
-}
-
-static int _ar_pipe_read(authreg_t ar, int fd, char *buf, int buflen)
-{
-    int ret;
-    char *c;
-
-    ret = read(fd, buf, buflen);
-    if(ret == 0)
-        log_write(ar->c2s->log, LOG_ERR, "pipe: got EOF from pipe");
-    if(ret < 0)
-        log_write(ar->c2s->log, LOG_ERR, "pipe: read from pipe failed: %s", strerror(errno));
-    if(ret <= 0)
-        return ret;
-
-    buf[ret] = '\0';
-    c = strchr(buf, '\n');
-    if(c != NULL)
-        *c = '\0';
-        
-    log_debug(ZONE, "read from pipe: %s", buf);
-
-    return ret;
-}
-
-static int _ar_pipe_user_exists(authreg_t ar, sess_t sess, const char *username, const char *realm)
-{
-    moddata_t data = (moddata_t) ar->private;
-    char buf[1024];
-
-    if(_ar_pipe_write(ar, data->out, "USER-EXISTS %s %s\n", username, realm) < 0)
+    if(username == NULL)
         return 0;
 
-    if(_ar_pipe_read(ar, data->in, buf, 1023) <= 0)
+    len = strlen(username);
+    if(len == 0 || len > PIPE_USER_MAX || username[0] == '-')
         return 0;
 
-    if(buf[0] != 'O' || buf[1] != 'K')
-        return 0;
+    for(i = 0; i < len; i++) {
+        char c = username[i];
+        if(!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-'))
+            return 0;
+    }
 
     return 1;
 }
 
-static int _ar_pipe_get_password(authreg_t ar, sess_t sess, const char *username, const char *realm, char password[257])
+/** a realm that cannot break the line protocol: no spaces, no control characters; may be empty */
+static int _ar_pipe_valid_realm(const char *realm)
+{
+    const unsigned char *c;
+
+    if(realm == NULL)
+        return 0;
+
+    for(c = (const unsigned char *) realm; *c != '\0'; c++)
+        if(*c <= ' ' || *c == 0x7f)
+            return 0;
+
+    return 1;
+}
+
+/** kill the helper and forget its pipes; the SIGCHLD handler reaps it */
+static void _ar_pipe_stop(moddata_t data)
+{
+    if(data->child <= 0)
+        return;
+
+    kill(data->child, SIGKILL);
+    close(data->in);
+    close(data->out);
+
+    data->child = 0;
+    data->in = data->out = -1;
+}
+
+/** read one line from the helper, without its newline; -1 on timeout, EOF, error or an overlong line */
+static int _ar_pipe_read_line(authreg_t ar, char *buf, size_t buflen)
 {
     moddata_t data = (moddata_t) ar->private;
-    char buf[1024];
+    struct pollfd pfd;
+    time_t deadline = time(NULL) + PIPE_TIMEOUT_MS / 1000, left;
+    size_t len = 0;
+    ssize_t ret;
+    char c;
 
-    if(_ar_pipe_write(ar, data->out, "GET-PASSWORD %s %s\n", username, realm) < 0)
-        return 1;
+    /* one byte at a time, so that nothing after the newline is taken;
+     * the time limit is for the whole line */
+    for(;;) {
+        pfd.fd = data->in;
+        pfd.events = POLLIN;
+        pfd.revents = 0;
 
-    if(_ar_pipe_read(ar, data->in, buf, 1023) <= 0)
-        return 1;
+        left = deadline - time(NULL);
+        ret = left > 0 ? poll(&pfd, 1, (int) left * 1000) : 0;
+        if(ret < 0 && errno == EINTR)
+            continue;
+        if(ret == 0) {
+            log_write(ar->c2s->log, LOG_ERR, "pipe: no reply from the authenticator in time");
+            return -1;
+        }
+        if(ret < 0) {
+            log_write(ar->c2s->log, LOG_ERR, "pipe: poll failed: %s", strerror(errno));
+            return -1;
+        }
 
-    if(buf[0] != 'O' || buf[1] != 'K')
-        return 1;
+        ret = read(data->in, &c, 1);
+        if(ret < 0 && errno == EINTR)
+            continue;
+        if(ret < 0) {
+            log_write(ar->c2s->log, LOG_ERR, "pipe: read from pipe failed: %s", strerror(errno));
+            return -1;
+        }
+        if(ret == 0) {
+            log_write(ar->c2s->log, LOG_ERR, "pipe: got EOF from pipe");
+            return -1;
+        }
 
-    if(buf[2] != ' ' || buf[3] == '\0')
-    {
-        log_debug(ZONE, "malformed response from pipe");
+        if(c == '\n') {
+            buf[len] = '\0';
+            return 0;
+        }
+
+        if(c == '\0' || len + 1 >= buflen) {
+            log_write(ar->c2s->log, LOG_ERR, "pipe: malformed reply from the authenticator");
+            return -1;
+        }
+
+        buf[len++] = c;
+    }
+}
+
+/** start the helper and read its greeting line into greeting (PIPE_LINE_MAX bytes); 0 on success */
+static int _ar_pipe_start(authreg_t ar, char *greeting)
+{
+    moddata_t data = (moddata_t) ar->private;
+    int to[2], from[2];
+    pid_t child;
+
+    if(pipe(to) < 0) {
+        log_write(ar->c2s->log, LOG_ERR, "pipe: failed to create pipe: %s", strerror(errno));
         return 1;
     }
 
-    if(apr_base64_decode_len(&buf[3], strlen(&buf[3])) >= 256) {
+    if(pipe(from) < 0) {
+        log_write(ar->c2s->log, LOG_ERR, "pipe: failed to create pipe: %s", strerror(errno));
+        close(to[0]);
+        close(to[1]);
+        return 1;
+    }
+
+    child = fork();
+    if(child < 0) {
+        log_write(ar->c2s->log, LOG_ERR, "pipe: failed to fork: %s", strerror(errno));
+        close(to[0]);
+        close(to[1]);
+        close(from[0]);
+        close(from[1]);
+        return 1;
+    }
+
+    /* child */
+    if(child == 0) {
+        if(dup2(to[0], STDIN_FILENO) < 0 || dup2(from[1], STDOUT_FILENO) < 0)
+            _exit(1);
+
+        close(to[0]);
+        close(to[1]);
+        close(from[0]);
+        close(from[1]);
+
+        execl(data->exec, data->exec, (char *) NULL);
+
+        _exit(1);
+    }
+
+    /* parent */
+    close(to[0]);
+    close(from[1]);
+
+    /* the helper must not inherit these when it is started again later,
+     * nor should anything else c2s may start */
+    fcntl(to[1], F_SETFD, FD_CLOEXEC);
+    fcntl(from[0], F_SETFD, FD_CLOEXEC);
+
+    data->child = child;
+    data->in = from[0];
+    data->out = to[1];
+
+    /* the greeting is "OK", followed by the requests the helper knows */
+    if(_ar_pipe_read_line(ar, greeting, PIPE_LINE_MAX) != 0 ||
+       (strcmp(greeting, "OK") != 0 && strncmp(greeting, "OK ", 3) != 0)) {
+        log_write(ar->c2s->log, LOG_ERR, "pipe: pipe authenticator %s failed to initialise", data->exec);
+        _ar_pipe_stop(data);
+        return 1;
+    }
+
+    log_write(ar->c2s->log, LOG_NOTICE, "pipe authenticator %s running (pid %d)", data->exec, (int) child);
+
+    return 0;
+}
+
+/** has the helper exited, or sent something nobody asked for? */
+static int _ar_pipe_unusable(moddata_t data)
+{
+    struct pollfd pfd;
+
+    pfd.fd = data->in;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+
+    /* between requests there is nothing to read from a healthy helper */
+    return poll(&pfd, 1, 0) != 0;
+}
+
+/**
+ * send one request line (the format must end in a newline) and read the
+ * one-line reply into reply (PIPE_LINE_MAX bytes). 0 on success. On any
+ * failure the helper is stopped and nothing of its output is kept.
+ */
+static int _ar_pipe_request(authreg_t ar, char *reply, const char *msgfmt, ...)
+{
+    moddata_t data = (moddata_t) ar->private;
+    va_list args;
+    char buf[PIPE_LINE_MAX], greeting[PIPE_LINE_MAX];
+    int len;
+    ssize_t ret;
+
+    reply[0] = '\0';
+
+    va_start(args, msgfmt);
+    len = vsnprintf(buf, sizeof(buf), msgfmt, args);
+    va_end(args);
+
+    /* a cut-off request would have no newline: do not send any of it */
+    if(len < 0 || (size_t) len >= sizeof(buf)) {
+        log_write(ar->c2s->log, LOG_NOTICE, "pipe: request too long, not sent");
+        return 1;
+    }
+
+    /* a helper that exited is replaced before it is needed */
+    if(data->child > 0 && _ar_pipe_unusable(data)) {
+        log_write(ar->c2s->log, LOG_ERR, "pipe: the authenticator exited or is out of step, restarting it");
+        _ar_pipe_stop(data);
+    }
+
+    if(data->child <= 0 && _ar_pipe_start(ar, greeting) != 0)
+        return 1;
+
+    /* a line is far smaller than PIPE_BUF, so it is written whole or not
+     * at all; SIGPIPE is ignored by c2s */
+    do {
+        ret = write(data->out, buf, len);
+    } while(ret < 0 && errno == EINTR);
+
+    if(ret != len) {
+        log_write(ar->c2s->log, LOG_ERR, "pipe: write to pipe failed: %s", ret < 0 ? strerror(errno) : "short write");
+        _ar_pipe_stop(data);
+        return 1;
+    }
+
+    if(_ar_pipe_read_line(ar, reply, PIPE_LINE_MAX) != 0) {
+        reply[0] = '\0';
+        _ar_pipe_stop(data);
+        return 1;
+    }
+
+    return 0;
+}
+
+/** base64 for a request line; 0 on success */
+static int _ar_pipe_encode(const char *password, char *buf, size_t buflen)
+{
+    int plen = strlen(password);
+
+    if(apr_base64_encode_len(plen) >= (int) buflen)
+        return 1;
+
+    apr_base64_encode(buf, password, plen);
+
+    return 0;
+}
+
+static int _ar_pipe_user_exists(authreg_t ar, sess_t sess, const char *username, const char *realm)
+{
+    char reply[PIPE_LINE_MAX];
+
+    if(!_ar_pipe_valid_user(username) || !_ar_pipe_valid_realm(realm))
+        return 0;
+
+    if(_ar_pipe_request(ar, reply, "USER-EXISTS %s %s\n", username, realm) != 0)
+        return 0;
+
+    return strcmp(reply, "OK") == 0;
+}
+
+static int _ar_pipe_get_password(authreg_t ar, sess_t sess, const char *username, const char *realm, char password[257])
+{
+    char reply[PIPE_LINE_MAX];
+
+    if(!_ar_pipe_valid_user(username) || !_ar_pipe_valid_realm(realm))
+        return 1;
+
+    if(_ar_pipe_request(ar, reply, "GET-PASSWORD %s %s\n", username, realm) != 0)
+        return 1;
+
+    /* "OK <base64 password>" */
+    if(strncmp(reply, "OK ", 3) != 0 || reply[3] == '\0')
+        return 1;
+
+    if(apr_base64_decode_len(&reply[3], strlen(&reply[3])) >= 256) {
         log_debug(ZONE, "decoded password longer than buffer");
         return 1;
     }
 
-    apr_base64_decode(password, &buf[3], strlen(&buf[3]));
-
-    log_debug(ZONE, "got password: %s", password);
+    apr_base64_decode(password, &reply[3], strlen(&reply[3]));
 
     return 0;
 }
 
 static int _ar_pipe_check_password(authreg_t ar, sess_t sess, const char *username, const char *realm, char password[257])
 {
-    moddata_t data = (moddata_t) ar->private;
-    char buf[1024];
-    int plen;
+    char reply[PIPE_LINE_MAX], b64[PIPE_LINE_MAX];
+    int ret;
 
-    plen = strlen(password);
-
-    if(apr_base64_encode_len(plen) >= 1023) {
-        log_debug(ZONE, "unable to encode password");
-        return 1;
-    }
-
-    apr_base64_encode(buf, password, plen);
-    
-    if(_ar_pipe_write(ar, data->out, "CHECK-PASSWORD %s %s %s\n", username, buf, realm) < 0)
+    if(!_ar_pipe_valid_user(username) || !_ar_pipe_valid_realm(realm))
         return 1;
 
-    if(_ar_pipe_read(ar, data->in, buf, 1023) <= 0)
+    if(_ar_pipe_encode(password, b64, sizeof(b64)) != 0)
         return 1;
 
-    if(buf[0] != 'O' || buf[1] != 'K')
+    ret = _ar_pipe_request(ar, reply, "CHECK-PASSWORD %s %s %s\n", username, b64, realm);
+    memset(b64, 0, sizeof(b64));
+    if(ret != 0)
         return 1;
 
-    return 0;
+    return strcmp(reply, "OK") == 0 ? 0 : 1;
 }
 
 static int _ar_pipe_set_password(authreg_t ar, sess_t sess, const char *username, const char *realm, char password[257])
 {
-    moddata_t data = (moddata_t) ar->private;
-    char buf[1024];
-    int plen;
+    char reply[PIPE_LINE_MAX], b64[PIPE_LINE_MAX];
+    int ret;
 
-    plen = strlen(password);
-
-    if(apr_base64_encode_len(plen) >= 1023) {
-        log_debug(ZONE, "unable to encode password");
-        return 1;
-    }
-
-    apr_base64_encode(buf, password, plen);
-
-    if(_ar_pipe_write(ar, data->out, "SET-PASSWORD %s %s %s\n", username, buf, realm) < 0)
+    if(!_ar_pipe_valid_user(username) || !_ar_pipe_valid_realm(realm))
         return 1;
 
-    if(_ar_pipe_read(ar, data->in, buf, 1023) <= 0)
+    if(_ar_pipe_encode(password, b64, sizeof(b64)) != 0)
         return 1;
 
-    if(buf[0] != 'O' || buf[1] != 'K')
+    ret = _ar_pipe_request(ar, reply, "SET-PASSWORD %s %s %s\n", username, b64, realm);
+    memset(b64, 0, sizeof(b64));
+    if(ret != 0)
         return 1;
 
-    return 0;
+    return strcmp(reply, "OK") == 0 ? 0 : 1;
 }
 
 static int _ar_pipe_create_user(authreg_t ar, sess_t sess, const char *username, const char *realm)
 {
-    moddata_t data = (moddata_t) ar->private;
-    char buf[1024];
+    char reply[PIPE_LINE_MAX];
 
-    if(_ar_pipe_write(ar, data->out, "CREATE-USER %s %s\n", username, realm) < 0)
+    if(!_ar_pipe_valid_user(username) || !_ar_pipe_valid_realm(realm))
         return 1;
 
-    if(_ar_pipe_read(ar, data->in, buf, 1023) <= 0)
+    if(_ar_pipe_request(ar, reply, "CREATE-USER %s %s\n", username, realm) != 0)
         return 1;
 
-    if(buf[0] != 'O' || buf[1] != 'K')
-        return 1;
-
-    return 0;
+    return strcmp(reply, "OK") == 0 ? 0 : 1;
 }
 
 static int _ar_pipe_delete_user(authreg_t ar, sess_t sess, const char *username, const char *realm)
 {
-    moddata_t data = (moddata_t) ar->private;
-    char buf[1024];
+    char reply[PIPE_LINE_MAX];
 
-    if(_ar_pipe_write(ar, data->out, "DELETE-USER %s %s\n", username, realm) < 0)
+    if(!_ar_pipe_valid_user(username) || !_ar_pipe_valid_realm(realm))
         return 1;
 
-    if(_ar_pipe_read(ar, data->in, buf, 1023) <= 0)
+    if(_ar_pipe_request(ar, reply, "DELETE-USER %s %s\n", username, realm) != 0)
         return 1;
 
-    if(buf[0] != 'O' || buf[1] != 'K')
-        return 1;
-
-    return 0;
+    return strcmp(reply, "OK") == 0 ? 0 : 1;
 }
 
 static void _ar_pipe_free(authreg_t ar)
 {
     moddata_t data = (moddata_t) ar->private;
 
-    if(_ar_pipe_write(ar, data->out, "FREE\n") < 0)
-        return;
-
-    close(data->in);
-    close(data->out);
+    if(data->child > 0) {
+        /* ask the helper to exit; closing its stdin does the same */
+        if(write(data->out, "FREE\n", 5) < 0)
+            log_debug(ZONE, "write to pipe failed: %s", strerror(errno));
+        close(data->in);
+        close(data->out);
+    }
 
     free(data);
-
-    return;
+    ar->private = NULL;
 }
 
+/** reap helpers that exited or were killed */
 static void _ar_pipe_signal(int signum)
 {
-    wait(NULL);
+    int saved_errno = errno;
 
-    /* !!! attempt to restart the pipe, or shutdown c2s */
+    while(waitpid(-1, NULL, WNOHANG) > 0)
+        ;
+
+    errno = saved_errno;
 }
 
 /** start me up */
 int ar_init(authreg_t ar)
 {
     moddata_t data;
-    int to[2], from[2], ret;
-    char buf[1024], *tok, *c;
+    char greeting[PIPE_LINE_MAX], *tok, *c;
 
     data = (moddata_t) calloc(1, sizeof(struct moddata_st));
+    data->in = data->out = -1;
 
     data->exec = config_get_one(ar->c2s->config, "authreg.pipe.exec", 0);
     if(data->exec == NULL)
@@ -264,108 +472,28 @@ int ar_init(authreg_t ar)
         return 1;
     }
 
-    if(pipe(to) < 0)
-    {
-        log_write(ar->c2s->log, LOG_ERR, "pipe: failed to create pipe: %s", strerror(errno));
-        free(data);
-        return 1;
-    }
-
-    if(pipe(from) < 0)
-    {
-        log_write(ar->c2s->log, LOG_ERR, "pipe: failed to create pipe: %s", strerror(errno));
-        close(to[0]);
-        close(to[1]);
-        free(data);
-        return 1;
-    }
+    ar->private = (void *) data;
 
     signal(SIGCHLD, _ar_pipe_signal);
 
-    log_debug(ZONE, "attempting to fork");
-
-    data->child = fork();
-    if(data->child < 0)
+    if(_ar_pipe_start(ar, greeting) != 0)
     {
-        log_write(ar->c2s->log, LOG_ERR, "pipe: failed to fork: %s", strerror(errno));
-        close(to[0]);
-        close(to[1]);
-        close(from[0]);
-        close(from[1]);
+        ar->private = NULL;
         free(data);
         return 1;
     }
 
-    /* child */
-    if(data->child == 0)
-    {
-        log_debug(ZONE, "executing %s", data->exec);
-
-        close(STDIN_FILENO);
-        close(STDOUT_FILENO);
-
-        dup2(to[0], STDIN_FILENO);
-        dup2(from[1], STDOUT_FILENO);
-
-        close(to[0]);
-        close(to[1]);
-        close(from[0]);
-        close(from[1]);
-        
-        execl(data->exec, data->exec, NULL);
-
-        log_write(ar->c2s->log, LOG_ERR, "pipe: failed to execute %s: %s", data->exec, strerror(errno));
-
-        free(data);
-
-        exit(1);
-    }
-
-    log_write(ar->c2s->log, LOG_NOTICE, "pipe authenticator %s running (pid %d)", data->exec, data->child);
-
-    /* parent */
-    close(to[0]);
-    close(from[1]);
-
-    data->in = from[0];
-    data->out = to[1];
-
-    ret = _ar_pipe_read(ar, data->in, buf, 1023);
-    if(ret <= 0)
-    {
-        close(data->in);
-        close(data->out);
-        free(data);
-        return 1;
-    }
-
-    c = buf;
+    /* the greeting was checked to start with OK; the rest are the
+     * requests the helper answers */
+    c = strchr(greeting, ' ');
     while(c != NULL)
     {
-        tok = c;
+        tok = ++c;
 
         c = strchr(c, ' ');
         if(c != NULL)
-        {
             *c = '\0';
-            c++;
-        }
 
-        /* first token must be OK */
-        if(tok == buf)
-        {
-            if(strcmp(tok, "OK") == 0)
-                continue;
-
-            log_write(ar->c2s->log, LOG_ERR, "pipe: pipe authenticator failed to initialise");
-            kill(data->child, SIGTERM);
-            close(data->in);
-            close(data->out);
-            free(data);
-            return 1;
-        }
-
-        /* its an option */
         log_debug(ZONE, "module feature: %s", tok);
 
         if(strcmp(tok, "USER-EXISTS") == 0)
@@ -383,8 +511,6 @@ int ar_init(authreg_t ar)
         else if(strcmp(tok, "FREE") == 0)
             ar->free = _ar_pipe_free;
     }
-
-    ar->private = (void *) data;
 
     return 0;
 }

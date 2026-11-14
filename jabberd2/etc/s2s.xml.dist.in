@@ -15,7 +15,10 @@
 
     <!-- Username/password to authenticate as -->
     <user>jabberd</user>          <!-- default: jabberd -->
-    <pass>secret</pass>           <!-- default: secret -->
+    <!-- ChatServer: a placeholder; the rc.d script puts this host's
+         random router secret here at the first start (see
+         router-users.xml) -->
+    <pass>__CHATSERVER_ROUTER_SECRET__</pass>
 
     <!-- The router will only allow one component to be the default
          route (ie the component that receives packets destined for
@@ -113,9 +116,8 @@
          at the highest level (root) CA" (the latter one being optional).
          If this is commented out, or the file can't be read, no attempt will be
          made to establish encrypted connections with other servers. -->
-    <!--
+    <!-- ChatServer: on, with <require_tls/> below -->
     <pemfile>@sysconfdir@/server.pem</pemfile>
-    -->
 
     <!-- SSL verify mode - see SSL_CTX_set_verify(3), mode parameter -->
     <!--
@@ -303,9 +305,11 @@
 
   <security>
     <!-- Require TLS secured S2S connections -->
-    <!--
-      <require_tls/>
-    -->
+    <!-- ChatServer: on. s2s itself is not started unless it is added to
+         chatserver_components in rc.conf. Note that s2s does not check
+         the other server's certificate unless <verify-mode/> says so;
+         see also the whitelist below. -->
+    <require_tls>1</require_tls>
 
     <!--
         Domain whitelisting

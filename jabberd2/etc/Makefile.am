@@ -1,9 +1,15 @@
 LIBTOOL += --quiet
 
-sysconf_DATA = c2s.xml.dist router.xml.dist s2s.xml.dist sm.xml.dist jabberd.cfg.dist router-users.xml.dist router-filter.xml.dist
+# ChatServer: these are installed by install-data-local below, not as
+# sysconf_DATA, so that they never exist with any mode but their final one:
+# the configuration holds the router secret. CONFIG_INSTALL_FLAGS can add
+# an owner and group (the top-level Makefile passes -o root -g jabber).
+config_files = c2s.xml.dist router.xml.dist s2s.xml.dist sm.xml.dist jabberd.cfg.dist router-users.xml.dist router-filter.xml.dist
+CONFIG_INSTALL_FLAGS = -m 640
+noinst_DATA = $(config_files)
 # ChatServer: no upstart or systemd files; FreeBSD uses rc.d (freebsd/rc.d/chatserver)
-configs = $(sysconf_DATA)
-EXTRA_DIST = $(sysconf_DATA:%.dist=%.dist.in)
+configs = $(config_files)
+EXTRA_DIST = $(config_files:%.dist=%.dist.in)
 
 SUBDIRS = templates
 
@@ -17,7 +23,7 @@ edit = sed \
 	-e 's,@libdir\@,$(libdir),g' \
 	-e 's,@pkglibdir\@,$(pkglibdir),g'
 
-$(configs): $(sysconf_DATA:%.dist=@srcdir@/%.dist.in)
+$(configs): $(config_files:%.dist=@srcdir@/%.dist.in)
 	@echo "generating $@ from $@.in"; \
     edit='$(edit)'; \
     list='$(jabberd_bin)'; for p in $$list; do \
@@ -28,14 +34,17 @@ $(configs): $(sysconf_DATA:%.dist=@srcdir@/%.dist.in)
 	eval "$$edit < @srcdir@/$@.in > $@.tmp"; \
 	mv $@.tmp $@ 
     
-install-data-hook:
-	@list='$(sysconf_DATA)'; for p in $$list; do \
+install-data-local: $(config_files)
+	$(MKDIR_P) $(DESTDIR)$(sysconfdir)
+	@list='$(config_files)'; for p in $$list; do \
       dest=`echo $$p | sed -e s/.dist//`; \
+	  echo " $(INSTALL) $(CONFIG_INSTALL_FLAGS) $$p $(DESTDIR)$(sysconfdir)/$$p"; \
+	  $(INSTALL) $(CONFIG_INSTALL_FLAGS) $$p $(DESTDIR)$(sysconfdir)/$$p || exit 1; \
 	  if test -f $(DESTDIR)$(sysconfdir)/$$dest; then \
         echo "$@ will not overwrite existing $(DESTDIR)$(sysconfdir)/$$dest"; \
       else \
-	    echo " $(INSTALL_DATA) $$p $(DESTDIR)$(sysconfdir)/$$dest"; \
-	    $(INSTALL_DATA) $$p $(DESTDIR)$(sysconfdir)/$$dest; \
+	    echo " $(INSTALL) $(CONFIG_INSTALL_FLAGS) $$p $(DESTDIR)$(sysconfdir)/$$dest"; \
+	    $(INSTALL) $(CONFIG_INSTALL_FLAGS) $$p $(DESTDIR)$(sysconfdir)/$$dest || exit 1; \
 	  fi; \
 	done
 

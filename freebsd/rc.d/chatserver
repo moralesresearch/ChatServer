@@ -1,5 +1,8 @@
 #!/bin/sh
 #
+# rc.d script for ChatServer, written for the FreeBSD port.
+# License: GPL-2.0-or-later, like jabberd2 (see COPYING).
+#
 # PROVIDE: chatserver
 # REQUIRE: LOGIN NETWORKING
 # KEYWORD: shutdown
@@ -12,15 +15,22 @@
 # chatserver_confdir (str):	Configuration directory.
 #				Default: "/usr/local/etc/jabberd"
 # chatserver_components (str):	Components, in start order.
-#				Default: "router sm s2s c2s"
+#				Default: "router sm c2s"
+#				For federation with other servers, add s2s:
+#				"router sm s2s c2s"
 # chatserver_gencert (bool):	Create a self-signed certificate,
 #				${chatserver_confdir}/server.pem, if there is
 #				none. Default: "YES"
 #
 # The domain is set by <id> in sm.xml and c2s.xml (localhost.localdomain
 # until it is changed). Users sign in with their system account through
-# PAM (/usr/local/etc/pam.d/jabberd); see pamauth(8) and
-# jabber_autobuddy(8).
+# PAM (/usr/local/etc/pam.d/jabberd) if they are members of the chat group;
+# see pamauth(8) and jabber_autobuddy(8).
+#
+# The components run as ${chatserver_user}, and this script runs as root.
+# It therefore never works on a path inside a directory that user can
+# write to (it could be handed a symbolic link), and never trusts a file
+# that user could have written: its own pidfiles are in /var/run.
 
 . /etc/rc.subr
 
@@ -33,7 +43,7 @@ load_rc_config $name
 : ${chatserver_enable:="NO"}
 : ${chatserver_user:="jabber"}
 : ${chatserver_confdir:="/usr/local/etc/jabberd"}
-: ${chatserver_components:="router sm s2s c2s"}
+: ${chatserver_components:="router sm c2s"}
 : ${chatserver_gencert:="YES"}
 
 bindir=/usr/local/libexec/jabberd
@@ -42,6 +52,12 @@ rundir=/var/run/jabberd
 dbdir=/var/db/jabberd
 logdir=/var/log/jabberd
 pemfile="${chatserver_confdir}/server.pem"
+# every component there is, in start order
+all_components="router sm s2s c2s"
+# what the configuration files hold in place of the router secret until
+# the first start
+secret_placeholder="__CHATSERVER_ROUTER_SECRET__"
+secret_files="router-users.xml c2s.xml sm.xml s2s.xml"
 
 start_precmd=chatserver_prestart
 start_cmd=chatserver_start
@@ -49,100 +65,273 @@ stop_cmd=chatserver_stop
 status_cmd=chatserver_status
 extra_commands="status"
 
-# daemon(8) supervises each component and restarts it if it exits
+# daemon(8) supervises each component and restarts it if it exits. Its
+# pidfile is in /var/run, which only root can write to.
 _supervisor_pidfile()
 {
-	echo "${rundir}/$1.daemon.pid"
+	echo "/var/run/chatserver.$1.pid"
 }
 
-_running()
+# Print the pid of the component's supervisor, if it is running. The
+# pidfile must hold one positive number, and that process must be a
+# daemon(8).
+_supervisor_pid()
 {
-	local pidfile
-	pidfile=$(_supervisor_pidfile $1)
-	[ -f "${pidfile}" ] && pgrep -F "${pidfile}" -q daemon 2>/dev/null
+	local pid pidfile
+
+	pidfile=$(_supervisor_pidfile "$1")
+	[ -f "${pidfile}" ] && [ ! -L "${pidfile}" ] || return 1
+	# (daemon(8) writes the number without a newline)
+	pid=$(head -n 1 "${pidfile}") || return 1
+	case "${pid}" in
+	''|*[!0-9]*|0*)
+		return 1 ;;
+	esac
+	[ ${#pid} -le 10 ] && [ "${pid}" -gt 1 ] || return 1
+	[ "$(ps -o comm= -p "${pid}" 2>/dev/null)" = daemon ] || return 1
+	echo "${pid}"
+}
+
+# Print the pid of the component itself, the supervisor's child, if both
+# are running. Between restarts of a component that keeps exiting there
+# is no child.
+_component_pid()
+{
+	local pid child
+
+	pid=$(_supervisor_pid "$1") || return 1
+	child=$(pgrep -P "${pid}" -x "$1" 2>/dev/null | head -n 1)
+	[ -n "${child}" ] || return 1
+	echo "${child}"
+}
+
+# Give this host its own router secret. The files as installed hold a
+# placeholder (the same in every copy of an OS image); the first start
+# replaces it with a random secret, in every file that still has it.
+# Files an administrator has changed have no placeholder and are left
+# alone.
+chatserver_secret()
+{
+	local f files group script tmp tmps rc
+
+	group="$1"
+	files=
+	for f in ${secret_files}; do
+		f="${chatserver_confdir}/${f}"
+		if [ -f "${f}" ] && grep -q "${secret_placeholder}" "${f}"; then
+			files="${files} ${f}"
+		fi
+	done
+	[ -n "${files}" ] || return 0
+
+	# The users file decides: if it already has a secret, a new random
+	# one elsewhere would only be wrong
+	if ! grep -q "${secret_placeholder}" \
+	    "${chatserver_confdir}/router-users.xml" 2>/dev/null; then
+		echo "${name}: these files still hold the placeholder" \
+		    "${secret_placeholder} but router-users.xml does not:${files}"
+		echo "${name}: put the secret of router-users.xml in their" \
+		    "<router><pass>."
+		return 1
+	fi
+
+	echo "Creating a router secret for this host."
+	# The secret must not appear in a command line (ps shows those):
+	# it goes from openssl into a sed script that only root can read
+	script=$(mktemp "${chatserver_confdir}/.secret.XXXXXXXX") || return 1
+	rc=0
+	tmps=
+	{
+		printf 's/%s/' "${secret_placeholder}" &&
+		openssl rand -hex 32 | tr -d '\n' &&
+		printf '/g\n'
+	} > "${script}" || rc=1
+	# 64 hex digits, or it is not a secret
+	if [ ${rc} -eq 0 ] && ! grep -Eq \
+	    "^s/${secret_placeholder}/[0-9a-f]{64}/g\$" "${script}"; then
+		echo "${name}: openssl rand failed."
+		rc=1
+	fi
+	# Write every new file before replacing any, so that an error
+	# leaves all of them as they were
+	if [ ${rc} -eq 0 ]; then
+		for f in ${files}; do
+			tmp=$(mktemp "${f}.XXXXXXXX") || { rc=1; break; }
+			tmps="${tmps} ${tmp}"
+			sed -f "${script}" "${f}" > "${tmp}" &&
+			    chown "root:${group}" "${tmp}" &&
+			    chmod 640 "${tmp}" || { rc=1; break; }
+		done
+	fi
+	if [ ${rc} -eq 0 ]; then
+		for tmp in ${tmps}; do
+			# the file's name is the temporary one's without
+			# mktemp's suffix
+			mv -f "${tmp}" "${tmp%.*}" || { rc=1; break; }
+		done
+	fi
+	rm -f "${script}" ${tmps}
+	return ${rc}
 }
 
 chatserver_prestart()
 {
-	local group
-	group=$(id -gn ${chatserver_user}) || return 1
+	local c f group
 
-	install -d -o ${chatserver_user} -g ${group} -m 750 \
-	    ${rundir} ${dbdir} ${dbdir}/stats ${logdir}
+	group=$(id -gn "${chatserver_user}") || return 1
 
-	if [ ! -f ${dbdir}/sqlite.db ]; then
+	for c in ${chatserver_components}; do
+		case " ${all_components} " in
+		*" ${c} "*) ;;
+		*)
+			echo "${name}: unknown component \"${c}\" in" \
+			    "chatserver_components."
+			return 1 ;;
+		esac
+		if [ ! -x "${bindir}/${c}" ]; then
+			echo "${name}: ${bindir}/${c} is missing."
+			return 1
+		fi
+		if [ ! -f "${chatserver_confdir}/${c}.xml" ]; then
+			echo "${name}: ${chatserver_confdir}/${c}.xml is missing."
+			return 1
+		fi
+	done
+
+	# These three are in directories only root can write to. Nothing
+	# below them is touched as root: the components' user owns them.
+	install -d -o "${chatserver_user}" -g "${group}" -m 750 \
+	    ${rundir} ${dbdir} ${logdir} || return 1
+	# for <stats/> in c2s.xml and s2s.xml
+	su -m "${chatserver_user}" -c \
+	    "umask 027; [ -d ${dbdir}/stats ] || mkdir ${dbdir}/stats" \
+	    >/dev/null 2>&1 ||
+	    echo "${name}: could not create ${dbdir}/stats; going on without it."
+
+	if ! su -m "${chatserver_user}" -c "test -f ${dbdir}/sqlite.db"; then
 		echo "Creating the ChatServer database ${dbdir}/sqlite.db."
-		su -m ${chatserver_user} -c \
+		su -m "${chatserver_user}" -c \
 		    "umask 077; /usr/local/bin/sqlite3 ${dbdir}/sqlite.db < ${schema}" \
 		    >/dev/null || return 1
 	fi
 
+	chatserver_secret "${group}" || return 1
+	for f in ${secret_files}; do
+		f="${chatserver_confdir}/${f}"
+		if [ -f "${f}" ] && grep -q "${secret_placeholder}" "${f}"; then
+			echo "${name}: ${f} still holds the placeholder" \
+			    "${secret_placeholder}; not starting."
+			return 1
+		fi
+	done
+
 	if [ ! -f "${pemfile}" ] && checkyesno chatserver_gencert; then
-		echo "Creating a self-signed certificate ${pemfile} for $(hostname)."
-		( umask 077
-		  openssl req -x509 -newkey rsa:3072 -nodes -days 3650 \
-		      -subj "/CN=$(hostname)" -keyout "${pemfile}.key" \
-		      -out "${pemfile}.crt" >/dev/null 2>&1 &&
-		  cat "${pemfile}.crt" "${pemfile}.key" > "${pemfile}"
-		  rc=$?
-		  rm -f "${pemfile}.crt" "${pemfile}.key"
-		  exit ${rc} ) || return 1
-		chown root:${group} "${pemfile}"
-		chmod 640 "${pemfile}"
+		chatserver_gencert "${group}" || return 1
 	fi
+}
+
+# A self-signed certificate for the host name and the chat domains of
+# c2s.xml. Clients cannot verify it; it is there so that the service works
+# before a real certificate is installed.
+chatserver_gencert()
+{
+	local d host san
+
+	host=$(hostname)
+	[ -n "${host}" ] || host=localhost
+	san="DNS:${host}"
+	# the domains of c2s.xml: <id ...>domain</id> in <local>, leaving
+	# out anything that is not plainly a host name
+	for d in $(sed -e '/<!--.*-->/d' -e '/<!--/,/-->/d' \
+	    "${chatserver_confdir}/c2s.xml" 2>/dev/null |
+	    sed -n -e '/<local>/,/<\/local>/s/.*>\([A-Za-z0-9.-]\{1,\}\)<\/id>.*/\1/p'); do
+		case ",${san}," in
+		*",DNS:${d},"*) ;;
+		*) san="${san},DNS:${d}" ;;
+		esac
+	done
+
+	echo "Creating a self-signed certificate ${pemfile} (${san})."
+	( umask 077
+	  openssl req -x509 -newkey rsa:3072 -nodes -days 825 \
+	      -subj "/CN=${host}" -addext "subjectAltName=${san}" \
+	      -keyout "${pemfile}.key" \
+	      -out "${pemfile}.crt" >/dev/null 2>&1 &&
+	  cat "${pemfile}.crt" "${pemfile}.key" > "${pemfile}.new" &&
+	  chown "root:$1" "${pemfile}.new" &&
+	  chmod 640 "${pemfile}.new" &&
+	  mv -f "${pemfile}.new" "${pemfile}"
+	  rc=$?
+	  rm -f "${pemfile}.crt" "${pemfile}.key" "${pemfile}.new"
+	  exit ${rc} ) || return 1
 }
 
 chatserver_start()
 {
-	local c
+	local c rc
 
 	echo "Starting ${name}."
 	for c in ${chatserver_components}; do
-		if _running ${c}; then
+		if _supervisor_pid ${c} >/dev/null; then
 			echo "${c} is already running."
 			continue
 		fi
-		/usr/sbin/daemon -f -r -R 5 -u ${chatserver_user} \
-		    -P $(_supervisor_pidfile ${c}) -t "chatserver: ${c}" \
-		    ${bindir}/${c} -c ${chatserver_confdir}/${c}.xml
+		rm -f "$(_supervisor_pidfile ${c})"
+		/usr/sbin/daemon -f -r -R 5 -u "${chatserver_user}" \
+		    -P "$(_supervisor_pidfile ${c})" -t "chatserver: ${c}" \
+		    ${bindir}/${c} -c "${chatserver_confdir}/${c}.xml" || return 1
 		# the other components connect to the router
 		if [ ${c} = router ]; then
 			sleep 1
 		fi
 	done
-	return 0
+
+	# a component that cannot run exits at once (and its supervisor
+	# would start it again every few seconds)
+	sleep 2
+	rc=0
+	for c in ${chatserver_components}; do
+		if ! _component_pid ${c} >/dev/null; then
+			echo "${name}: ${c} did not stay up; see the system log."
+			rc=1
+		fi
+	done
+	return ${rc}
 }
 
 chatserver_stop()
 {
-	local c pids pidfile
+	local c pid pids
 
 	echo "Stopping ${name}."
 	pids=
-	for c in $(echo ${chatserver_components} | tr ' ' '\n' | tail -r); do
-		pidfile=$(_supervisor_pidfile ${c})
-		if _running ${c}; then
-			pids="${pids} $(cat ${pidfile})"
-			kill -TERM $(cat ${pidfile})
+	# all of them, in case chatserver_components changed since the start
+	for c in $(echo ${all_components} | tr ' ' '\n' | tail -r); do
+		if pid=$(_supervisor_pid ${c}); then
+			pids="${pids} ${pid}"
+			kill -TERM "${pid}"
 		fi
 	done
 	if [ -n "${pids}" ]; then
 		wait_for_pids ${pids}
 	fi
-	for c in ${chatserver_components}; do
-		rm -f $(_supervisor_pidfile ${c})
+	for c in ${all_components}; do
+		rm -f "$(_supervisor_pidfile ${c})"
 	done
 	return 0
 }
 
 chatserver_status()
 {
-	local c rc
+	local c pid rc
 
 	rc=0
 	for c in ${chatserver_components}; do
-		if _running ${c}; then
-			echo "${c} is running as pid $(pgrep -P $(cat $(_supervisor_pidfile ${c})))."
+		if pid=$(_component_pid ${c}); then
+			echo "${c} is running as pid ${pid}."
+		elif _supervisor_pid ${c} >/dev/null; then
+			echo "${c} is not running (it exited; its supervisor will start it again)."
+			rc=1
 		else
 			echo "${c} is not running."
 			rc=1

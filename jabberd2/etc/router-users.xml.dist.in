@@ -1,9 +1,14 @@
 <!-- This is the list of known router users, and their authentication
      secrets. Access control is done via the settings in router.xml -->
+<!-- ChatServer: the secret below is a placeholder. The rc.d script
+     replaces it, here and in c2s.xml, sm.xml and s2s.xml, with a random
+     secret made on this host when the service first starts, and refuses to
+     start the service while the placeholder is left anywhere. Whoever
+     knows the secret can act as any component, and so as any user. -->
 <users>
   <user>
     <name>jabberd</name>
-    <secret>secret</secret>
+    <secret>__CHATSERVER_ROUTER_SECRET__</secret>
   </user>
 </users>
 <!--

@@ -45,7 +45,12 @@
          the Jabber Component Protocol's "handshake", for example
          mu-conference). If this is commented out, support for XEP-0114
          components will be disabled. -->
-    <secret>secret</secret>
+    <!-- ChatServer: disabled. If you need it, choose a long random
+         secret of your own: a component that knows it is trusted like
+         the server's own. -->
+    <!--
+    <secret>a-long-random-secret</secret>
+    -->
 
     <!-- File containing an SSL certificate and private key for client
          connections. From SSL_CTX_use_certificate_chain_file(3):

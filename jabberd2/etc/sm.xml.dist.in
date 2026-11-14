@@ -15,7 +15,10 @@
 
     <!-- Username/password to authenticate as -->
     <user>jabberd</user>          <!-- default: jabberd -->
-    <pass>secret</pass>           <!-- default: secret -->
+    <!-- ChatServer: a placeholder; the rc.d script puts this host's
+         random router secret here at the first start (see
+         router-users.xml) -->
+    <pass>__CHATSERVER_ROUTER_SECRET__</pass>
 
     <!-- File containing an SSL certificate and private key to use when
          setting up an encrypted channel with the router. From
@@ -346,9 +349,13 @@
   <aci>
     <!-- The JIDs listed here will get access to all restricted
          functions, regardless of restrictions further down -->
+    <!-- ChatServer: nobody by default. Accounts are system accounts, so
+         a JID listed here is whoever holds that account name. -->
+    <!--
     <acl type='all'>
       <jid>admin@localhost.localdomain</jid>
     </acl>
+    -->
 
     <!-- These JIDs can send broadcast messages (announce, motd) -->
     <!--

@@ -15,7 +15,10 @@
 
     <!-- Username/password to authenticate as -->
     <user>jabberd</user>          <!-- default: jabberd -->
-    <pass>secret</pass>           <!-- default: secret -->
+    <!-- ChatServer: a placeholder; the rc.d script puts this host's
+         random router secret here at the first start (see
+         router-users.xml) -->
+    <pass>__CHATSERVER_ROUTER_SECRET__</pass>
 
     <!-- File containing an SSL certificate and private key to use when
          setting up an encrypted channel with the router. From
@@ -264,7 +267,12 @@
              <connects seconds='Y' throttle='Z'>X</connects>
 
            Default Y is 5, default Z is 5. set X to 0 to disable. -->
-      <connects>0</connects>
+      <!-- ChatServer: on, to slow down password guessing. Together with
+           the three sign-in attempts a stream gets, this allows one
+           address about six guesses a second at most, in bursts of 60.
+           Raise it if many users share one address (NAT, a web
+           gateway). -->
+      <connects seconds='10' throttle='30'>20</connects>
 
       <!-- Maximum stanza size - if more than given number of bytes
            are read in one incoming stanza, the stream is closed
@@ -439,8 +447,13 @@
 
       <!-- it's advisable that you disable plain in the above
            <mechanisms/> section -->
+      <!-- ChatServer: no traditional (XEP-0078, jabber:iq:auth) sign-in
+           at all. It is obsolete, and it tells anyone who asks whether
+           an account exists. Clients use SASL PLAIN over TLS. -->
       <traditional>
+        <!--
         <plain/>
+        -->
       </traditional>
 
       <sasl>

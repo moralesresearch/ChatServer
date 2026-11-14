@@ -106,13 +106,35 @@ static int _ar_pipe_valid_realm(const char *realm)
     return 1;
 }
 
-/** kill the helper and forget its pipes; the SIGCHLD handler reaps it */
+/*
+ * The helper's pid, and whether the SIGCHLD handler has reaped it. Once it
+ * is reaped the pid can belong to another process, and must not be
+ * signalled. Both are only changed with SIGCHLD blocked. (One helper per
+ * c2s: the module is loaded once.)
+ */
+static volatile sig_atomic_t _ar_pipe_helper = 0;
+static volatile sig_atomic_t _ar_pipe_helper_reaped = 0;
+
+/** kill the helper, unless it is gone already, and forget its pipes; the SIGCHLD handler reaps it */
 static void _ar_pipe_stop(moddata_t data)
 {
+    sigset_t chld, old;
+
     if(data->child <= 0)
         return;
 
-    kill(data->child, SIGKILL);
+    sigemptyset(&chld);
+    sigaddset(&chld, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &chld, &old);
+
+    /* with SIGCHLD blocked, a helper that is not reaped yet stays ours
+     * (alive or a zombie) until after the kill */
+    if(_ar_pipe_helper == (sig_atomic_t) data->child && !_ar_pipe_helper_reaped)
+        kill(data->child, SIGKILL);
+    _ar_pipe_helper = 0;
+
+    sigprocmask(SIG_SETMASK, &old, NULL);
+
     close(data->in);
     close(data->out);
 
@@ -182,6 +204,7 @@ static int _ar_pipe_start(authreg_t ar, char *greeting)
     moddata_t data = (moddata_t) ar->private;
     int to[2], from[2];
     pid_t child;
+    sigset_t chld, old;
 
     if(pipe(to) < 0) {
         log_write(ar->c2s->log, LOG_ERR, "pipe: failed to create pipe: %s", strerror(errno));
@@ -195,8 +218,14 @@ static int _ar_pipe_start(authreg_t ar, char *greeting)
         return 1;
     }
 
+    /* SIGCHLD waits until the handler can know the new helper's pid */
+    sigemptyset(&chld);
+    sigaddset(&chld, SIGCHLD);
+    sigprocmask(SIG_BLOCK, &chld, &old);
+
     child = fork();
     if(child < 0) {
+        sigprocmask(SIG_SETMASK, &old, NULL);
         log_write(ar->c2s->log, LOG_ERR, "pipe: failed to fork: %s", strerror(errno));
         close(to[0]);
         close(to[1]);
@@ -207,6 +236,8 @@ static int _ar_pipe_start(authreg_t ar, char *greeting)
 
     /* child */
     if(child == 0) {
+        sigprocmask(SIG_SETMASK, &old, NULL);
+
         if(dup2(to[0], STDIN_FILENO) < 0 || dup2(from[1], STDOUT_FILENO) < 0)
             _exit(1);
 
@@ -221,6 +252,10 @@ static int _ar_pipe_start(authreg_t ar, char *greeting)
     }
 
     /* parent */
+    _ar_pipe_helper = (sig_atomic_t) child;
+    _ar_pipe_helper_reaped = 0;
+    sigprocmask(SIG_SETMASK, &old, NULL);
+
     close(to[0]);
     close(from[1]);
 
@@ -438,19 +473,23 @@ static void _ar_pipe_free(authreg_t ar)
             log_debug(ZONE, "write to pipe failed: %s", strerror(errno));
         close(data->in);
         close(data->out);
+        /* it exits by itself; nothing is signalled any more */
+        data->child = 0;
     }
 
     free(data);
     ar->private = NULL;
 }
 
-/** reap helpers that exited or were killed */
+/** reap helpers that exited or were killed, and note when it was the current one */
 static void _ar_pipe_signal(int signum)
 {
     int saved_errno = errno;
+    pid_t pid;
 
-    while(waitpid(-1, NULL, WNOHANG) > 0)
-        ;
+    while((pid = waitpid(-1, NULL, WNOHANG)) > 0)
+        if((sig_atomic_t) pid == _ar_pipe_helper)
+            _ar_pipe_helper_reaped = 1;
 
     errno = saved_errno;
 }

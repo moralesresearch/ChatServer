@@ -170,7 +170,11 @@ host replaces it, in `router-users.xml`, `c2s.xml`, `sm.xml` and `s2s.xml`,
 with 32 random bytes from `openssl rand`, keeping the files mode 640
 `root:jabber`. Files that no longer hold the placeholder are never touched,
 so you can set a secret of your own instead. The service does not start
-while the placeholder is left in any of the four files.
+while the placeholder is left in any of the four files, nor while one of
+them still holds `secret`, the secret that every installation of earlier
+builds shared: when upgrading such an installation, put the placeholder in
+its place (in `<secret>` of `router-users.xml` and `<router><pass>` of the
+other three) and start the service.
 
 The XEP-0114 component secret in `router.xml` is commented out. If you need
 external components, set a long random secret of your own there.

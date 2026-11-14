@@ -341,6 +341,25 @@ check "carol signs in right afterwards (the hung helper was replaced)" \
     roster carol 'carol-Secret3'
 check_not "the hung helper is gone" kill -0 ${helper}
 
+# Six sign-in requests in one write are all read by c2s before it gets to
+# close the stream. pamauth logs every password it checks; the requests are
+# for six different users, the first one new to the log, so that syslogd
+# does not fold the lines into "last message repeated".
+sleep 1
+log_before=$(wc -l < /var/log/auth.log)
+r=$(${client} --pipeline heidi,alice,bob,dave,frank,grace 'wrong-password' ${domain} || true)
+echo "${r}"
+sleep 2
+asked=$(tail -n +$((log_before + 1)) /var/log/auth.log |
+    grep -c 'pamauth.*authentication failed for' || true)
+tail -n +$((log_before + 1)) /var/log/auth.log | grep pamauth || true
+echo "pamauth checked ${asked} of the 6 passwords"
+check "six requests in one write were all sent" has "${r}" '^sent 6 requests in one write$'
+check "none of them signed anyone in" has "${r}" '^successes: 0$'
+check "the stream was closed" has "${r}" '^stream closed: yes$'
+check "pamauth was asked for exactly 3 of them" test "${asked}" = 3
+check "carol signs in afterwards" roster carol 'carol-Secret3'
+
 echo "== jabber:iq:auth (XEP-0078) is off"
 a=$(${client} --iq-auth alice ${domain} || true)
 b=$(${client} --iq-auth nosuchuser ${domain} || true)
@@ -592,6 +611,34 @@ check "and says which" has "${out}" "c2s\.xml"
 check_not "nothing was started" pgrep -x 'router|sm|s2s|c2s'
 check "router-users.xml kept its secret" test "$(router_secret)" = "${secret}"
 cp -p ${tmp}/c2s.xml ${etc}/c2s.xml
+
+# a configuration from an earlier build, with the secret everyone knows
+cp -p ${etc}/router-users.xml ${tmp}/router-users.xml
+sed -i '' -e "s|<secret>${secret}</secret>|<secret>secret</secret>|" ${etc}/router-users.xml
+check "router-users.xml now has the old shared secret" \
+    grep -q '<secret>secret</secret>' ${etc}/router-users.xml
+set +e
+out=$(service chatserver start 2>&1); rc=$?
+set -e
+echo "${out}"
+check "start fails with the old shared secret in router-users.xml" test ${rc} != 0
+check "and says why" has "${out}" 'old shared one'
+check "it names router-users.xml" has "${out}" 'router-users\.xml'
+check "it says how to fix it" has "${out}" "${placeholder}"
+check_not "nothing was started" pgrep -x 'router|sm|s2s|c2s'
+cp -p ${tmp}/router-users.xml ${etc}/router-users.xml
+cp -p ${etc}/sm.xml ${tmp}/sm.xml
+sed -i '' -e "s|<pass>${secret}</pass>|<pass>secret</pass>|" ${etc}/sm.xml
+set +e
+out=$(service chatserver start 2>&1); rc=$?
+set -e
+echo "${out}"
+check "start fails with the old shared secret in sm.xml" test ${rc} != 0
+check "it names sm.xml" has "${out}" '/sm\.xml'
+check_not "nothing was started" pgrep -x 'router|sm|s2s|c2s'
+cp -p ${tmp}/sm.xml ${etc}/sm.xml
+check "sm.xml has the host's secret again" grep -q "<pass>${secret}</pass>" ${etc}/sm.xml
+
 echo '<c2s><broken' > ${etc}/c2s.xml
 check_not "start fails when c2s cannot stay up (broken c2s.xml)" \
     service chatserver start

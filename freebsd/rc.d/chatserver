@@ -176,7 +176,7 @@ chatserver_secret()
 
 chatserver_prestart()
 {
-	local c f group
+	local c f group old
 
 	group=$(id -gn "${chatserver_user}") || return 1
 
@@ -213,6 +213,33 @@ chatserver_prestart()
 		su -m "${chatserver_user}" -c \
 		    "umask 077; /usr/local/bin/sqlite3 ${dbdir}/sqlite.db < ${schema}" \
 		    >/dev/null || return 1
+	fi
+
+	# A configuration from before the secret was made per host still
+	# has the one every installation shared
+	if grep -q '<secret>secret</secret>' \
+	    "${chatserver_confdir}/router-users.xml" 2>/dev/null; then
+		old="${chatserver_confdir}/router-users.xml"
+	else
+		old=
+	fi
+	for f in c2s.xml sm.xml s2s.xml; do
+		f="${chatserver_confdir}/${f}"
+		if [ -f "${f}" ] && sed -n '/<router>/,/<\/router>/p' "${f}" |
+		    grep -q '<pass>secret</pass>'; then
+			old="${old} ${f}"
+		fi
+	done
+	if [ -n "${old}" ]; then
+		echo "${name}: not starting: the router secret is still the" \
+		    "old shared one (\"secret\"), which every local user knows, in:"
+		echo "${name}:  ${old}"
+		echo "${name}: Put ${secret_placeholder} in its place, in" \
+		    "<secret> of router-users.xml and in <router><pass> of" \
+		    "c2s.xml, sm.xml and s2s.xml, and start again: a random" \
+		    "secret is then made for this host. (Or set one long" \
+		    "random secret of your own in all four.)"
+		return 1
 	fi
 
 	chatserver_secret "${group}" || return 1

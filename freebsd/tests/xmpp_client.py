@@ -7,6 +7,7 @@ usage: xmpp_client.py [options] USER PASSWORD DOMAIN
        xmpp_client.py --plain-before-tls DOMAIN
        xmpp_client.py --iq-auth USER DOMAIN
        xmpp_client.py --component SECRET DOMAIN
+       xmpp_client.py --pipeline USER,USER,... PASSWORD DOMAIN
 
 Prints "# signed in as ..." and the roster as lines of
 "jid<TAB>subscription<TAB>name<TAB>groups", and exits 0 when the user signed
@@ -28,6 +29,10 @@ The other forms sign nobody in:
                       iq-auth; always exits 0 when it got an answer
   --component SECRET  try the router's XEP-0114 component handshake on port
                       5347; exit 0 if accepted, 2 if refused
+  --pipeline USERS    after STARTTLS, send one SASL PLAIN request for each
+                      of the comma-separated USERS, with PASSWORD, in a
+                      single write, and print how many answers came back
+                      before the server closed the stream; exits 0
 """
 
 import argparse
@@ -184,6 +189,26 @@ def component(secret, domain):
     return 0
 
 
+def pipeline(users, password, domain):
+    s, features = tls_stream(domain)
+    if "PLAIN" not in mechanisms(features):
+        raise ValueError("PLAIN not offered after STARTTLS")
+    requests = ""
+    for user in users.split(","):
+        token = base64.b64encode(
+            ("\0%s\0%s" % (user, password)).encode()).decode()
+        requests += ("<auth xmlns='urn:ietf:params:xml:ns:xmpp-sasl' "
+                     "mechanism='PLAIN'>%s</auth>" % token)
+    s.send(requests)    # one write: one TLS record, read by c2s at once
+    text = s.collect(8)
+    print("sent %d requests in one write" % len(users.split(",")))
+    print("failures: %d" % len(re.findall(r"<failure\b", text)))
+    print("successes: %d" % len(re.findall(r"<success\b", text)))
+    print("stream closed: %s" % ("yes" if re.search(STREAM_END, text)
+                                 else "no"))
+    return 0
+
+
 def sign_in(args):
     s, features = tls_stream(args.domain)
     if "PLAIN" not in mechanisms(features):
@@ -256,6 +281,7 @@ def main(argv):
     p.add_argument("--plain-before-tls", action="store_true")
     p.add_argument("--iq-auth", action="store_true")
     p.add_argument("--component", action="store_true")
+    p.add_argument("--pipeline", action="store_true")
     p.add_argument("--wrong-first", type=int, default=0)
     p.add_argument("--hold", type=float, default=0)
     p.add_argument("rest", nargs="+")
@@ -270,6 +296,9 @@ def main(argv):
     if args.component:
         secret, domain = args.rest
         return component(secret, domain)
+    if args.pipeline:
+        users, password, domain = args.rest
+        return pipeline(users, password, domain)
     args.user, args.password, args.domain = args.rest
     return sign_in(args)
 

@@ -301,6 +301,15 @@ static void _authreg_auth_set(c2s_t c2s, sess_t sess, nad_t nad) {
         sx_nad_write(sess->s, stanza_tofrom(stanza_error(nad, 0, stanza_err_FORBIDDEN), 0));
         return;
     }
+
+    /* ChatServer: a stream that has used up its attempts gets no more,
+     * also when further requests arrived together with the last one and
+     * are handled before the stream is closed: the auth module is not
+     * asked again */
+    if(sess->auth_failures >= C2S_MAX_AUTH_FAILURES) {
+        sx_nad_write(sess->s, stanza_tofrom(stanza_error(nad, 0, stanza_err_OLD_UNAUTH), 0));
+        return;
+    }
     
     /* do we have the user? */
     if((sess->host->ar->user_exists)(sess->host->ar, sess, username, sess->host->realm) == 0) {

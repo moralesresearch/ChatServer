@@ -490,6 +490,14 @@ static int _c2s_sx_sasl_callback(int cb, void *arg, void **res, sx_t s, void *cb
 
             log_debug(ZONE, "sx sasl callback: check pass (authnid=%s, realm=%s)", creds->authnid, creds->realm);
 
+            /* ChatServer: a stream that has used up its attempts gets no
+             * more. The stream is closed once the data just read has been
+             * handled (_c2s_client_mio_callback); attempts that arrived
+             * together with the last one fail here, without the auth
+             * module being asked. */
+            if(sess->auth_failures >= C2S_MAX_AUTH_FAILURES)
+                return sx_sasl_ret_FAIL;
+
             if(sess->host->ar->check_password != NULL) {
                 if ((sess->host->ar->check_password)(
                             sess->host->ar, sess, (char *)creds->authnid, (creds->realm != NULL) ? (char *)creds->realm : "", (char *)creds->pass) == 0)

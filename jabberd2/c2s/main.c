@@ -494,18 +494,19 @@ static int _c2s_sx_sasl_callback(int cb, void *arg, void **res, sx_t s, void *cb
                 if ((sess->host->ar->check_password)(
                             sess->host->ar, sess, (char *)creds->authnid, (creds->realm != NULL) ? (char *)creds->realm : "", (char *)creds->pass) == 0)
                     return sx_sasl_ret_OK;
-                else
-                    return sx_sasl_ret_FAIL;
+
+                /* ChatServer: counted; see _c2s_client_mio_callback */
+                sess->auth_failures++;
+                return sx_sasl_ret_FAIL;
             }
 
             if(sess->host->ar->get_password != NULL) {
-                if ((sess->host->ar->get_password)(sess->host->ar, sess, (char *)creds->authnid, (creds->realm != NULL) ? (char *)creds->realm : "", buf) != 0)
-                    return sx_sasl_ret_FAIL;
-
-                if (strcmp(creds->pass, buf)==0)
+                if ((sess->host->ar->get_password)(sess->host->ar, sess, (char *)creds->authnid, (creds->realm != NULL) ? (char *)creds->realm : "", buf) == 0 &&
+                    strcmp(creds->pass, buf)==0)
                     return sx_sasl_ret_OK;
             }
 
+            sess->auth_failures++;
             return sx_sasl_ret_FAIL;
             break;
 

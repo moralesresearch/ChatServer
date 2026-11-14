@@ -114,7 +114,14 @@ struct sess_st {
 
     /* Per user session authreg private data */
     void                *authreg_private;
+
+    /** ChatServer: failed sign-in attempts on this stream; the stream is
+        closed at C2S_MAX_AUTH_FAILURES */
+    int                 auth_failures;
 };
+
+/** ChatServer: failed sign-in attempts allowed on one stream */
+#define C2S_MAX_AUTH_FAILURES   3
 
 /* allowed mechanisms */
 #define AR_MECH_TRAD_PLAIN      (1<<0)

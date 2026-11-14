@@ -304,6 +304,8 @@ static void _authreg_auth_set(c2s_t c2s, sess_t sess, nad_t nad) {
     
     /* do we have the user? */
     if((sess->host->ar->user_exists)(sess->host->ar, sess, username, sess->host->realm) == 0) {
+        /* ChatServer: counted; see _c2s_client_mio_callback */
+        sess->auth_failures++;
         sx_nad_write(sess->s, stanza_tofrom(stanza_error(nad, 0, stanza_err_OLD_UNAUTH), 0));
         return;
     }
@@ -424,6 +426,9 @@ static void _authreg_auth_set(c2s_t c2s, sess_t sess, nad_t nad) {
     }
 
     _authreg_auth_log(c2s, sess, "traditional", username, resource, FALSE);
+
+    /* ChatServer: counted; see _c2s_client_mio_callback */
+    sess->auth_failures++;
 
     /* auth failed, so error */
     sx_nad_write(sess->s, stanza_tofrom(stanza_error(nad, 0, stanza_err_OLD_UNAUTH), 0));

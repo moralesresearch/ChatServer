@@ -34,13 +34,22 @@ static void _bind_features(sx_t s, sx_plugin_t p, nad_t nad) {
     if(s->auth_id == NULL) {
         c2s_t c2s;
         host_t host;
+        int ar_mechs;
 
         log_debug(ZONE, "not auth'd, offering auth and register");
 
-        ns = nad_add_namespace(nad, uri_IQAUTH, NULL);
-        nad_append_elem(nad, ns, "auth", 1);
-    
         c2s = (c2s_t) p->private;
+
+        /* ChatServer: jabber:iq:auth is only offered when the
+         * configuration has a traditional mechanism for this stream */
+        ar_mechs = c2s->ar_mechanisms;
+        if(s->ssf > 0)
+            ar_mechs |= c2s->ar_ssl_mechanisms;
+        if(ar_mechs & (AR_MECH_TRAD_PLAIN | AR_MECH_TRAD_DIGEST | AR_MECH_TRAD_CRAMMD5)) {
+            ns = nad_add_namespace(nad, uri_IQAUTH, NULL);
+            nad_append_elem(nad, ns, "auth", 1);
+        }
+
         host = xhash_get(c2s->hosts, s->req_to);
         if(! host) host = c2s->vhost;
         if(host && host->ar_register_enable) {

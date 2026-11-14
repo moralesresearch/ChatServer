@@ -484,16 +484,32 @@ static int _c2s_client_sx_callback(sx_t s, sx_event_t e, void *data, void *arg) 
  * errors in particular, which close the stream) reached the new one.
  */
 static int _c2s_next_session_tag(c2s_t c2s) {
-    static int last = 0;
+    static unsigned int last = 0;
+    static int seeded = 0;
     char key[44];
 
+    /* start somewhere random, so that the ids of one run of c2s are not
+     * handed out again by the next run, while the sm may still hold
+     * packets for them */
+    if(!seeded) {
+#if defined(__FreeBSD__) || defined(__APPLE__) || defined(__OpenBSD__) || defined(__NetBSD__)
+        last = arc4random();
+#else
+        last = (unsigned int) time(NULL) ^ ((unsigned int) getpid() << 16);
+#endif
+        seeded = 1;
+    }
+
+    /* ids are positive ints: count in unsigned arithmetic, which wraps
+     * without overflowing, and keep 31 bits */
     do {
-        if(++last <= 0)
+        last = (last + 1) & 0x7fffffffU;
+        if(last == 0)
             last = 1;
-        snprintf(key, sizeof(key), "%d", last);
+        snprintf(key, sizeof(key), "%u", last);
     } while(xhash_get(c2s->sessions, key) != NULL);
 
-    return last;
+    return (int) last;
 }
 
 static int _c2s_client_accept_check(c2s_t c2s, mio_fd_t fd, const char *ip) {
@@ -529,7 +545,7 @@ static int _c2s_client_mio_callback(mio_t m, mio_action_t a, mio_fd_t fd, void *
     bres_t bres;
     struct sockaddr_storage sa;
     socklen_t namelen = sizeof(sa);
-    int port, nbytes, flags = 0;
+    int port, nbytes, flags = 0, ret;
 
     switch(a) {
         case action_READ:
@@ -544,7 +560,22 @@ static int _c2s_client_mio_callback(mio_t m, mio_action_t a, mio_fd_t fd, void *
                 return 0;
             }
 
-            return sx_can_read(sess->s);
+            ret = sx_can_read(sess->s);
+
+            /* ChatServer: a stream gets a few sign-in attempts (SASL or
+             * jabber:iq:auth, counted where they fail), then it is closed,
+             * so that guessing passwords costs a new connection, which
+             * the connection rate limit (io.limits.connects) slows down.
+             * The failure reply for the last attempt is already queued
+             * ahead of the stream error. The session is not freed until
+             * the main loop, so it is still safe to look at here. */
+            if(sess->auth_failures >= C2S_MAX_AUTH_FAILURES && sess->s->state < state_CLOSING) {
+                log_write(sess->c2s->log, LOG_NOTICE, "[%d] [%s, port=%d] too many failed authentication attempts, closing the stream", sess->s->tag, sess->ip, sess->port);
+                sx_error(sess->s, stream_err_POLICY_VIOLATION, "too many failed authentication attempts");
+                sx_close(sess->s);
+            }
+
+            return ret;
 
         case action_WRITE:
             log_debug(ZONE, "write action on fd %d", fd->fd);

@@ -1,3 +1,4 @@
+# License: GPL-2.0-or-later, like jabberd2 (see ../COPYING).
 PROG=	jabber_autobuddy
 MAN=	jabber_autobuddy.8
 PREFIX?=	/usr/local

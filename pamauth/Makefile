@@ -1,3 +1,4 @@
+# License: GPL-2.0-or-later, like jabberd2 (see ../COPYING).
 PROG=	pamauth
 MAN=	pamauth.8
 LIBADD=	pam

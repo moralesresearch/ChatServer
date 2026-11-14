@@ -1,0 +1,30 @@
+ChatServer for FreeBSD
+======================
+
+This branch is jabberd2 2.7.0 with the FreeBSD port of Apple's ChatServer
+additions.
+
+jabberd2 (the jabberd2/ directory) is licensed under the GNU General Public
+License, version 2 or (at your option) any later version. The full text is
+in jabberd2/COPYING, and jabberd2/AUTHORS lists its authors. Some files in
+jabberd2 carry their own, compatible notices (for example the Apache
+base64 code and the MD5 and SHA-1 implementations in jabberd2/util).
+
+The files written for this port are under the same license, GPL-2.0-or-later,
+and each says so:
+
+  jabberd2/sm/mod_autobuddy.c       freebsd/rc.d/chatserver
+  jabber_autobuddy/                 freebsd/pam.d/jabberd
+  pamauth/                          freebsd/tests/
+  Makefile                          .github/workflows/freebsd.yml
+
+  Copyright (c) 2026 Morales Research Corporation
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public License for
+more details.
+
+Apple's original ChatServer sources are on the main branch, under the
+licenses stated there. None of Apple's code that is licensed for use on
+Apple-branded computers only is used in this branch; see README.md.

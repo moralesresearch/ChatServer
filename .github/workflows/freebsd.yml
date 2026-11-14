@@ -1,3 +1,4 @@
+# License: GPL-2.0-or-later, like jabberd2 (see COPYING).
 # Build ChatServer and test it end to end in a FreeBSD 14.5 VM.
 # GitLab.com's hosted runners have no KVM, so this runs on the GitHub
 # mirror (moralesresearch/ChatServer)
@@ -21,7 +22,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build, install and test in a FreeBSD 14.5 VM
-        uses: vmactions/freebsd-vm@v1.5.9
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           release: "14.5"
           sync: rsync
@@ -47,7 +48,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Build with GCC in a FreeBSD 14.5 VM
-        uses: vmactions/freebsd-vm@v1.5.9
+        uses: vmactions/freebsd-vm@c46abacb49f09938ca4e1702d15d836285d694cc # v1.5.9
         with:
           release: "14.5"
           sync: rsync
